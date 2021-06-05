@@ -18,14 +18,14 @@ package raft
 //
 
 import (
-//	"bytes"
+	//	"bytes"
 	"sync"
 	"sync/atomic"
+	"time"
 
-//	"6.824/labgob"
+	//	"6.824/labgob"
 	"6.824/labrpc"
 )
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -50,6 +50,13 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
+//角色
+const (
+	Leader = iota
+	Follower
+	Candidate
+)
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -63,7 +70,12 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	currentTerm int
+	voteFor     int
+	//角色
+	role int
+	//最后一次心跳的时间
+	lastHearBeat int64
 }
 
 // return currentTerm and whether this server
@@ -92,7 +104,6 @@ func (rf *Raft) persist() {
 	// rf.persister.SaveRaftState(data)
 }
 
-
 //
 // restore previously persisted state.
 //
@@ -115,7 +126,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -136,13 +146,16 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term        int
+	candidateId int
+	//lastLogIndex int
+	//lastLogTerm  int
 }
 
 //
@@ -151,6 +164,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	term      int
+	voteGrant bool
 }
 
 //
@@ -158,6 +173,13 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	if args.term < rf.currentTerm {
+		reply.voteGrant = false
+		reply.term = rf.currentTerm
+		return
+	}
+
+
 }
 
 //
@@ -194,7 +216,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -215,7 +236,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
 
 	return index, term, isLeader
 }
@@ -253,6 +273,8 @@ func (rf *Raft) ticker() {
 	}
 }
 
+const HEARTBEAT_TIMEOUT = 10
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -272,13 +294,74 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.role = Follower
+	rf.currentTerm = 0
+	rf.lastHearBeat = time.Now().Unix()
+	//心跳
+	go func() {
+		for true {
+			switch rf.role {
+			case Leader:
+				for i := 0; i < len(peers); i++ {
+					if i != me {
+						args := RequestVoteArgs{}
+						args.term = rf.currentTerm
+						args.candidateId = me
+						reply := RequestVoteReply{}
+						rf.sendRequestVote(i, &args, &reply)
+					}
+				}
+			case Follower:
+				if time.Now().Unix()-rf.lastHearBeat > HEARTBEAT_TIMEOUT {
+					rf.role = Candidate
+					//inc current term
+					rf.currentTerm++
+					//发送选举给其他服务器
+					vote := 0
+					for i := 0; i < len(peers); i++ {
+						if i != me {
+							args := RequestVoteArgs{}
+							args.term = rf.currentTerm
+							args.candidateId = me
+							reply := RequestVoteReply{}
+							if rf.sendRequestVote(i, &args, &reply) {
+								vote += 1
+							}
+						}
+					}
+					//过半数投票
+					if vote > len(peers)/2 {
+						rf.role = Leader
+					}
+				}
+			case Candidate:
+				//发送选举给其他服务器
+				vote := 0
+				for i := 0; i < len(peers); i++ {
+					if i != me {
+						args := RequestVoteArgs{}
+						args.term = rf.currentTerm
+						args.candidateId = me
+						reply := RequestVoteReply{}
+						if rf.sendRequestVote(i, &args, &reply) {
+							vote += 1
+						}
+					}
+				}
+				//过半数投票
+				if vote > len(peers)/2 {
+					rf.role = Leader
+				}
+			}
+			time.Sleep(HEARTBEAT_TIMEOUT * time.Second)
+		}
+	}()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
 
 	return rf
 }
