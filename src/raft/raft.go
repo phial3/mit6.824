@@ -81,11 +81,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
 	// Your code here (2A).
-	return term, isleader
+	return rf.currentTerm, rf.role == Leader
 }
 
 //
@@ -177,9 +174,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.voteGrant = false
 		reply.term = rf.currentTerm
 		return
+	} else {
+		reply.voteGrant = true
+		reply.term = args.term
+		rf.currentTerm = args.term
+		rf.lastHearBeat = time.Now().Unix()
+		rf.role = Follower
+		rf.voteFor = args.candidateId
 	}
-
-
 }
 
 //
@@ -297,6 +299,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.role = Follower
 	rf.currentTerm = 0
 	rf.lastHearBeat = time.Now().Unix()
+	rf.voteFor = -1
 	//心跳
 	go func() {
 		for true {
@@ -324,7 +327,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 							args.term = rf.currentTerm
 							args.candidateId = me
 							reply := RequestVoteReply{}
-							if rf.sendRequestVote(i, &args, &reply) {
+							if rf.sendRequestVote(i, &args, &reply) && reply.voteGrant {
 								vote += 1
 							}
 						}
@@ -343,7 +346,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 						args.term = rf.currentTerm
 						args.candidateId = me
 						reply := RequestVoteReply{}
-						if rf.sendRequestVote(i, &args, &reply) {
+						if rf.sendRequestVote(i, &args, &reply) && reply.voteGrant {
 							vote += 1
 						}
 					}
