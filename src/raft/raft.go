@@ -7,10 +7,10 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, Term, isleader)
 //   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
+// rf.GetState() (Term, isLeader)
+//   ask a Raft for its current Term, and whether it thinks it is leader
 // ApplyMsg
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
@@ -18,6 +18,7 @@ package raft
 //
 
 import (
+	"fmt"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -52,9 +53,9 @@ type ApplyMsg struct {
 
 //角色
 const (
-	Leader = iota
-	Follower
+	Follower = iota
 	Candidate
+	Leader
 )
 
 //
@@ -149,8 +150,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term        int
-	candidateId int
+	Term        int
+	CandidateId int
 	//lastLogIndex int
 	//lastLogTerm  int
 }
@@ -161,8 +162,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term      int
-	voteGrant bool
+	Term      int
+	VoteGrant bool
 }
 
 //
@@ -170,17 +171,28 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	if args.term < rf.currentTerm {
-		reply.voteGrant = false
-		reply.term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.VoteGrant = false
+		reply.Term = rf.currentTerm
 		return
-	} else {
-		reply.voteGrant = true
-		reply.term = args.term
-		rf.currentTerm = args.term
-		rf.lastHearBeat = time.Now().Unix()
+	} else if args.Term > rf.currentTerm {
+		reply.VoteGrant = true
+		reply.Term = args.Term
+		rf.currentTerm = args.Term
+		rf.lastHearBeat = time.Now().UnixNano() / 1e6
 		rf.role = Follower
-		rf.voteFor = args.candidateId
+		rf.voteFor = args.CandidateId
+	} else {
+		if rf.voteFor != -1 {
+			reply.VoteGrant = false
+			reply.Term = rf.currentTerm
+		} else {
+			rf.lastHearBeat = time.Now().UnixNano() / 1e6
+			reply.VoteGrant = true
+			reply.Term = rf.currentTerm
+			rf.role = Follower
+			rf.voteFor = args.CandidateId
+		}
 	}
 }
 
@@ -229,7 +241,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
+// Term. the third return value is true if this server believes it is
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -275,7 +287,11 @@ func (rf *Raft) ticker() {
 	}
 }
 
-const HEARTBEAT_TIMEOUT = 10
+//心跳超时
+const HeartbeatTimeout = 150
+
+//心跳时间间隔
+const HeartbeatInterval = 50
 
 //
 // the service or tester wants to create a Raft server. the ports
@@ -298,65 +314,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.role = Follower
 	rf.currentTerm = 0
-	rf.lastHearBeat = time.Now().Unix()
+	rf.lastHearBeat = time.Now().UnixNano() / 1e6
 	rf.voteFor = -1
-	//心跳
+	//leader定时发送心跳
+	go func() {
+		rf.startHeartbeat()
+	}()
+	//心跳超时检测
 	go func() {
 		for true {
-			switch rf.role {
-			case Leader:
-				for i := 0; i < len(peers); i++ {
-					if i != me {
-						args := RequestVoteArgs{}
-						args.term = rf.currentTerm
-						args.candidateId = me
-						reply := RequestVoteReply{}
-						rf.sendRequestVote(i, &args, &reply)
-					}
-				}
-			case Follower:
-				if time.Now().Unix()-rf.lastHearBeat > HEARTBEAT_TIMEOUT {
-					rf.role = Candidate
-					//inc current term
-					rf.currentTerm++
-					//发送选举给其他服务器
-					vote := 0
-					for i := 0; i < len(peers); i++ {
-						if i != me {
-							args := RequestVoteArgs{}
-							args.term = rf.currentTerm
-							args.candidateId = me
-							reply := RequestVoteReply{}
-							if rf.sendRequestVote(i, &args, &reply) && reply.voteGrant {
-								vote += 1
-							}
-						}
-					}
-					//过半数投票
-					if vote > len(peers)/2 {
-						rf.role = Leader
-					}
-				}
-			case Candidate:
-				//发送选举给其他服务器
-				vote := 0
-				for i := 0; i < len(peers); i++ {
-					if i != me {
-						args := RequestVoteArgs{}
-						args.term = rf.currentTerm
-						args.candidateId = me
-						reply := RequestVoteReply{}
-						if rf.sendRequestVote(i, &args, &reply) && reply.voteGrant {
-							vote += 1
-						}
-					}
-				}
-				//过半数投票
-				if vote > len(peers)/2 {
-					rf.role = Leader
-				}
-			}
-			time.Sleep(HEARTBEAT_TIMEOUT * time.Second)
+			rf.heartbeatTimeout()
 		}
 	}()
 
@@ -367,4 +334,60 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go rf.ticker()
 
 	return rf
+}
+
+func (rf *Raft) startHeartbeat() {
+	for true {
+		if rf.role == Leader {
+			voteCnt := rf.sendHeartbeat()
+			if voteCnt <= len(rf.peers)/2 {
+				//变为候选人，等待下一次选举
+				rf.role = Candidate
+			}
+		}
+		time.Sleep(HeartbeatInterval * time.Millisecond)
+	}
+}
+
+func (rf *Raft) heartbeatTimeout() {
+	for true {
+		now := time.Now().UnixNano() / 1e6
+		if now-rf.lastHearBeat > HeartbeatTimeout {
+			//fmt.Printf("heartbeat timeout...%d\n", rf.me)
+			switch rf.role {
+			case Leader:
+				rf.role = Candidate
+			case Follower:
+				rf.role = Candidate
+			case Candidate:
+				rf.currentTerm++
+				//发送选举给其他服务器
+				voteCnt := rf.sendHeartbeat()
+				if voteCnt > len(rf.peers)/2 {
+					rf.role = Leader
+					fmt.Printf("become leader...%d\n", rf.me)
+				}
+			}
+		}
+		time.Sleep(HeartbeatTimeout * time.Millisecond)
+	}
+}
+
+func (rf *Raft) sendHeartbeat() int {
+	//fmt.Printf("send heartbeat ...id:%d\n", rf.me)
+	var wg sync.WaitGroup
+	voteCnt := 0
+	for i := 0; i < len(rf.peers); i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
+			reply := RequestVoteReply{}
+			if rf.sendRequestVote(i, &args, &reply) && reply.VoteGrant {
+				voteCnt++
+			}
+		}(i)
+	}
+	wg.Wait()
+	return voteCnt
 }
