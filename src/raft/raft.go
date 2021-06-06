@@ -174,25 +174,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.VoteGrant = false
 		reply.Term = rf.currentTerm
-		return
-	} else if args.Term > rf.currentTerm {
+	} else if args.Term > rf.currentTerm || rf.voteFor == -1 {
 		reply.VoteGrant = true
 		reply.Term = args.Term
-		rf.currentTerm = args.Term
 		rf.lastHearBeat = time.Now().UnixNano() / 1e6
+		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.voteFor = args.CandidateId
-	} else {
-		if rf.voteFor != -1 {
-			reply.VoteGrant = false
-			reply.Term = rf.currentTerm
-		} else {
-			rf.lastHearBeat = time.Now().UnixNano() / 1e6
-			reply.VoteGrant = true
-			reply.Term = rf.currentTerm
-			rf.role = Follower
-			rf.voteFor = args.CandidateId
-		}
 	}
 }
 
@@ -306,6 +294,7 @@ const HeartbeatInterval = 50
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	fmt.Printf("raft start...server:%d\n", me)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -353,7 +342,7 @@ func (rf *Raft) heartbeatTimeout() {
 	for true {
 		now := time.Now().UnixNano() / 1e6
 		if now-rf.lastHearBeat > HeartbeatTimeout {
-			//fmt.Printf("heartbeat timeout...%d\n", rf.me)
+			fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 			switch rf.role {
 			case Leader:
 				rf.role = Candidate
@@ -365,7 +354,7 @@ func (rf *Raft) heartbeatTimeout() {
 				voteCnt := rf.sendHeartbeat()
 				if voteCnt > len(rf.peers)/2 {
 					rf.role = Leader
-					fmt.Printf("become leader...%d\n", rf.me)
+					fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
 				}
 			}
 		}
@@ -376,15 +365,22 @@ func (rf *Raft) heartbeatTimeout() {
 func (rf *Raft) sendHeartbeat() int {
 	//fmt.Printf("send heartbeat ...id:%d\n", rf.me)
 	var wg sync.WaitGroup
-	voteCnt := 0
+	//包含自己的票数
+	voteCnt := 1
+	//更新本地的心跳时间
+	rf.lastHearBeat = time.Now().UnixNano() / 1e6
+	//投票给自己
+	rf.voteFor = rf.me
 	for i := 0; i < len(rf.peers); i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
 			reply := RequestVoteReply{}
-			if rf.sendRequestVote(i, &args, &reply) && reply.VoteGrant {
-				voteCnt++
+			if i != rf.me {
+				if rf.sendRequestVote(i, &args, &reply) && reply.VoteGrant {
+					voteCnt++
+				}
 			}
 		}(i)
 	}
