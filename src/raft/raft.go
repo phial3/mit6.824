@@ -19,6 +19,8 @@ package raft
 
 import (
 	"fmt"
+	"math/rand"
+
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -170,18 +172,23 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	//voteForBefore := rf.voteFor
 	// Your code here (2A, 2B).
 	if args.Term < rf.currentTerm {
 		reply.VoteGrant = false
 		reply.Term = rf.currentTerm
-	} else if args.Term > rf.currentTerm || rf.voteFor == -1 {
+	} else if args.Term > rf.currentTerm || rf.voteFor == -1 || rf.voteFor == args.CandidateId {
 		reply.VoteGrant = true
 		reply.Term = args.Term
 		rf.lastHearBeat = time.Now().UnixNano() / 1e6
 		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.voteFor = args.CandidateId
+	} else {
+		reply.VoteGrant = false
+		reply.Term = args.Term
 	}
+	//fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,voteFor:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, voteForBefore, reply.VoteGrant)
 }
 
 //
@@ -311,9 +318,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 	//心跳超时检测
 	go func() {
-		for true {
-			rf.heartbeatTimeout()
-		}
+		rf.heartbeatTimeout()
 	}()
 
 	// initialize from state persisted before a crash
@@ -350,6 +355,7 @@ func (rf *Raft) heartbeatTimeout() {
 				rf.role = Candidate
 			case Candidate:
 				rf.currentTerm++
+				fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
 				//发送选举给其他服务器
 				voteCnt := rf.sendHeartbeat()
 				if voteCnt > len(rf.peers)/2 {
@@ -358,12 +364,14 @@ func (rf *Raft) heartbeatTimeout() {
 				}
 			}
 		}
-		time.Sleep(HeartbeatTimeout * time.Millisecond)
+		//随机超时时间
+		timeout := HeartbeatTimeout + rand.Intn(50)
+		time.Sleep(time.Duration(timeout) * time.Millisecond)
 	}
 }
 
 func (rf *Raft) sendHeartbeat() int {
-	//fmt.Printf("send heartbeat ...id:%d\n", rf.me)
+	//fmt.Printf("send heartbeat ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	var wg sync.WaitGroup
 	//包含自己的票数
 	voteCnt := 1
