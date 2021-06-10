@@ -86,6 +86,18 @@ func TestReElection2A(t *testing.T) {
 	cfg.end()
 }
 
+/*func TestErrorElection2A(t *testing.T) {
+	servers := 3
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2A): election after network failure")
+	cfg.disconnect(0)
+	cfg.disconnect(1)
+	time.Sleep(600 * time.Second)
+	cfg.end()
+}*/
+
 func TestManyElections2A(t *testing.T) {
 	servers := 7
 	cfg := make_config(t, servers, false, false)

@@ -190,7 +190,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGrant = false
 		reply.Term = args.Term
 	}
-	fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
+	//fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
 }
 
 //
@@ -345,7 +345,7 @@ func (rf *Raft) heartbeatTimeout() {
 	for true {
 		now := time.Now().UnixNano() / 1e6
 		if now-rf.lastHearBeat > HeartbeatTimeout {
-			fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+			//fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 			//修改用户的任期，需要加锁
 			switch rf.role {
 			case Leader:
@@ -367,35 +367,42 @@ func (rf *Raft) heartbeatTimeout() {
 }
 
 func (rf *Raft) sendHeartbeat() {
-	//fmt.Printf("send heartbeat ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+	fmt.Printf("send heartbeat ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+	rf.mu.Lock()
 	//更新本地的心跳时间
 	rf.lastHearBeat = time.Now().UnixNano() / 1e6
 	//投票给自己
 	rf.voteFor = rf.me
+	rf.mu.Unlock()
 	//var wg sync.WaitGroup
 	voteChan := make(chan bool, 100)
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
 	for i := 0; i < len(rf.peers); i++ {
 		go func(i int) {
+			//fmt.Printf("send request vote...candidateId:%d,to:%d\n", rf.me, i)
 			args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
 			reply := RequestVoteReply{}
 			if i != rf.me {
-				if rf.sendRequestVote(i, &args, &reply) && reply.VoteGrant {
+				resp := rf.sendRequestVote(i, &args, &reply)
+				//fmt.Printf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, resp)
+				if resp && reply.VoteGrant {
 					voteChan <- true
 				} else {
 					voteChan <- false
 				}
+			} else {
+				//自己直接投票成功
+				voteChan <- true
 			}
 		}(i)
 	}
 	//用chan来进行多线程之间的数据交互，确实简单很多，而且不需要考虑并发的问题
-	voteCnt := 1
-	for i := 0; i <= len(rf.peers); i++ {
+	voteCnt := 0
+	for i := 0; i < len(rf.peers); i++ {
 		vote, ok := <-voteChan
 		if ok && vote {
 			voteCnt++
-			//fmt.Printf("voteCnt:%d\n", voteCnt)
 			if voteCnt > len(rf.peers)/2 {
 				rf.mu.Lock()
 				if rf.role != Leader {

@@ -49,7 +49,9 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.824/labgob"
+import (
+	"6.824/labgob"
+)
 import "bytes"
 import "reflect"
 import "sync"
@@ -104,6 +106,10 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	case <-e.done:
 		// entire Network has been destroyed.
 		return false
+	/*case <-time.After(time.Duration(time.Microsecond * 500)):
+		//增加一个超时处理，不然rpc会导致整个选举卡死了
+		fmt.Printf("request timeout...\n")
+		return false*/
 	}
 
 	//
