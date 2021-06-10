@@ -85,6 +85,8 @@ type Raft struct {
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.currentTerm, rf.role == Leader
 }
 
@@ -190,7 +192,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGrant = false
 		reply.Term = args.Term
 	}
-	//fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
+	fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
 }
 
 //
@@ -310,17 +312,27 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.mu.Lock()
 	rf.role = Follower
 	rf.currentTerm = 0
 	rf.lastHearBeat = time.Now().UnixNano() / 1e6
 	rf.voteFor = -1
+	rf.mu.Unlock()
 	//leader定时发送心跳
 	go func() {
-		rf.startHeartbeat()
+		for true {
+			rf.startHeartbeat()
+			time.Sleep(HeartbeatInterval * time.Millisecond)
+		}
 	}()
 	//心跳超时检测
 	go func() {
-		rf.heartbeatTimeout()
+		for true {
+			rf.heartbeatTimeout()
+			//随机超时时间
+			timeout := HeartbeatTimeout + rand.Intn(50)
+			time.Sleep(time.Duration(timeout) * time.Millisecond)
+		}
 	}()
 
 	// initialize from state persisted before a crash
@@ -333,36 +345,30 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) startHeartbeat() {
-	for true {
-		if rf.role == Leader {
-			rf.sendHeartbeat()
-		}
-		time.Sleep(HeartbeatInterval * time.Millisecond)
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	if rf.role == Leader {
+		rf.sendHeartbeat()
 	}
 }
 
 func (rf *Raft) heartbeatTimeout() {
-	for true {
-		now := time.Now().UnixNano() / 1e6
-		if now-rf.lastHearBeat > HeartbeatTimeout {
-			//fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
-			//修改用户的任期，需要加锁
-			switch rf.role {
-			case Leader:
-				//rf.role = Candidate
-			case Follower, Candidate:
-				rf.mu.Lock()
-				rf.role = Candidate
-				rf.currentTerm++
-				rf.mu.Unlock()
-				fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
-				//发送选举给其他服务器
-				rf.sendHeartbeat()
-			}
+	//rf.mu.Lock()
+	//defer rf.mu.Unlock()
+	now := time.Now().UnixNano() / 1e6
+	if now-rf.lastHearBeat > HeartbeatTimeout {
+		fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+		//修改用户的任期，需要加锁
+		switch rf.role {
+		case Leader:
+			//rf.role = Candidate
+		case Follower, Candidate:
+			rf.role = Candidate
+			rf.currentTerm++
+			//fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
+			//发送选举给其他服务器
+			rf.sendHeartbeat()
 		}
-		//随机超时时间
-		timeout := HeartbeatTimeout + rand.Intn(50)
-		time.Sleep(time.Duration(timeout) * time.Millisecond)
 	}
 }
 
@@ -375,17 +381,17 @@ func (rf *Raft) sendHeartbeat() {
 	rf.voteFor = rf.me
 	rf.mu.Unlock()
 	//var wg sync.WaitGroup
-	voteChan := make(chan bool, 100)
+	voteChan := make(chan bool, 1)
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
 	for i := 0; i < len(rf.peers); i++ {
 		go func(i int) {
-			//fmt.Printf("send request vote...candidateId:%d,to:%d\n", rf.me, i)
+			fmt.Printf("send request vote...candidateId:%d,to:%d\n", rf.me, i)
 			args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
 			reply := RequestVoteReply{}
 			if i != rf.me {
 				resp := rf.sendRequestVote(i, &args, &reply)
-				//fmt.Printf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, resp)
+				fmt.Printf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, resp)
 				if resp && reply.VoteGrant {
 					voteChan <- true
 				} else {
@@ -401,6 +407,7 @@ func (rf *Raft) sendHeartbeat() {
 	voteCnt := 0
 	for i := 0; i < len(rf.peers); i++ {
 		vote, ok := <-voteChan
+		fmt.Printf("get vote:%t\n", vote)
 		if ok && vote {
 			voteCnt++
 			if voteCnt > len(rf.peers)/2 {
