@@ -174,6 +174,8 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//voteForBefore := rf.voteFor
 	// Your code here (2A, 2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.VoteGrant = false
 		reply.Term = rf.currentTerm
@@ -188,7 +190,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGrant = false
 		reply.Term = args.Term
 	}
-	//fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,voteFor:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, voteForBefore, reply.VoteGrant)
+	fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
 }
 
 //
@@ -333,11 +335,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) startHeartbeat() {
 	for true {
 		if rf.role == Leader {
-			voteCnt := rf.sendHeartbeat()
-			if voteCnt <= len(rf.peers)/2 {
-				//变为候选人，等待下一次选举
-				rf.role = Candidate
-			}
+			rf.sendHeartbeat()
 		}
 		time.Sleep(HeartbeatInterval * time.Millisecond)
 	}
@@ -348,20 +346,18 @@ func (rf *Raft) heartbeatTimeout() {
 		now := time.Now().UnixNano() / 1e6
 		if now-rf.lastHearBeat > HeartbeatTimeout {
 			fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+			//修改用户的任期，需要加锁
 			switch rf.role {
 			case Leader:
+				//rf.role = Candidate
+			case Follower, Candidate:
+				rf.mu.Lock()
 				rf.role = Candidate
-			case Follower:
-				rf.role = Candidate
-			case Candidate:
 				rf.currentTerm++
+				rf.mu.Unlock()
 				fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
 				//发送选举给其他服务器
-				voteCnt := rf.sendHeartbeat()
-				if voteCnt > len(rf.peers)/2 {
-					rf.role = Leader
-					fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-				}
+				rf.sendHeartbeat()
 			}
 		}
 		//随机超时时间
@@ -370,28 +366,46 @@ func (rf *Raft) heartbeatTimeout() {
 	}
 }
 
-func (rf *Raft) sendHeartbeat() int {
+func (rf *Raft) sendHeartbeat() {
 	//fmt.Printf("send heartbeat ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
-	var wg sync.WaitGroup
-	//包含自己的票数
-	voteCnt := 1
 	//更新本地的心跳时间
 	rf.lastHearBeat = time.Now().UnixNano() / 1e6
 	//投票给自己
 	rf.voteFor = rf.me
+	//var wg sync.WaitGroup
+	voteChan := make(chan bool, 100)
+	//包含自己的票数
+	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
 	for i := 0; i < len(rf.peers); i++ {
-		wg.Add(1)
 		go func(i int) {
-			defer wg.Done()
 			args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
 			reply := RequestVoteReply{}
 			if i != rf.me {
 				if rf.sendRequestVote(i, &args, &reply) && reply.VoteGrant {
-					voteCnt++
+					voteChan <- true
+				} else {
+					voteChan <- false
 				}
 			}
 		}(i)
 	}
-	wg.Wait()
-	return voteCnt
+	//用chan来进行多线程之间的数据交互，确实简单很多，而且不需要考虑并发的问题
+	voteCnt := 1
+	for i := 0; i <= len(rf.peers); i++ {
+		vote, ok := <-voteChan
+		if ok && vote {
+			voteCnt++
+			//fmt.Printf("voteCnt:%d\n", voteCnt)
+			if voteCnt > len(rf.peers)/2 {
+				rf.mu.Lock()
+				if rf.role != Leader {
+					rf.role = Leader
+					fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
+				}
+				rf.mu.Unlock()
+				//过半数结点同意就可以提前退出
+				return
+			}
+		}
+	}
 }
