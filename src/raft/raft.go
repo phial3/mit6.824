@@ -222,6 +222,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//更新当前任期并更新过期时间
 		rf.currentTerm = reply.Term
 		reply.Term = rf.currentTerm
+		now := time.Now().UnixNano() / 1e6
+		rf.heartBeatTimeout = now + HeartBeatTimeoutInterval
 		reply.Success = true
 	}
 }
@@ -383,11 +385,11 @@ func (rf *Raft) startHeartbeat() {
 	defer rf.mu.Unlock()
 	if rf.role == Leader {
 		for i := 0; i < len(rf.peers); i++ {
-			go func(i int, rf *Raft) {
-				args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
+			go func(i int, currentTerm int) {
+				args := AppendEntriesArgs{Term: currentTerm, LeaderId: rf.me}
 				reply := AppendEntriesReply{}
 				rf.sendAppendEntries(i, &args, &reply)
-			}(i, rf)
+			}(i, rf.currentTerm)
 		}
 	}
 }
@@ -418,9 +420,9 @@ func (rf *Raft) requestVote() {
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
 	for i := 0; i < len(rf.peers); i++ {
-		go func(i int) {
+		go func(i int, currentTerm int) {
 			fmt.Printf("send request vote...candidateId:%d,to:%d\n", rf.me, i)
-			args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
+			args := RequestVoteArgs{Term: currentTerm, CandidateId: rf.me}
 			reply := RequestVoteReply{}
 			if i != rf.me {
 				resp := rf.sendRequestVote(i, &args, &reply)
@@ -434,13 +436,13 @@ func (rf *Raft) requestVote() {
 				//自己直接投票成功
 				voteChan <- true
 			}
-		}(i)
+		}(i, rf.currentTerm)
 	}
 	//用chan来进行多线程之间的数据交互，确实简单很多，而且不需要考虑并发的问题
 	voteCnt := 0
 	for i := 0; i < len(rf.peers); i++ {
 		vote, ok := <-voteChan
-		fmt.Printf("get vote:%t\n", vote)
+		//fmt.Printf("get vote:%t\n", vote)
 		if ok && vote {
 			voteCnt++
 			if voteCnt > len(rf.peers)/2 {
