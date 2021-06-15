@@ -19,8 +19,6 @@ package raft
 
 import (
 	"fmt"
-	"math/rand"
-
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -60,6 +58,8 @@ const (
 	Leader
 )
 
+const HeartBeatTimeoutInterval = 300
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -77,8 +77,8 @@ type Raft struct {
 	voteFor     int
 	//角色
 	role int
-	//最后一次心跳的时间
-	lastHearBeat int64
+	//心跳过期时间
+	heartBeatTimeout int64
 }
 
 // return currentTerm and whether this server
@@ -154,10 +154,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	Term        int
-	CandidateId int
-	//lastLogIndex int
-	//lastLogTerm  int
+	Term         int
+	CandidateId  int
+	lastLogIndex int
+	lastLogTerm  int
 }
 
 //
@@ -174,7 +174,6 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	//voteForBefore := rf.voteFor
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -184,7 +183,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if args.Term > rf.currentTerm || rf.voteFor == -1 || rf.voteFor == args.CandidateId {
 		reply.VoteGrant = true
 		reply.Term = args.Term
-		rf.lastHearBeat = time.Now().UnixNano() / 1e6
+		rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + HeartBeatTimeoutInterval
 		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.voteFor = args.CandidateId
@@ -193,6 +192,38 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = args.Term
 	}
 	fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
+}
+
+type LogEntry struct {
+	//TODO:entry格式
+}
+type AppendEntriesArgs struct {
+	Term         int
+	LeaderId     int
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+}
+
+//接收appendEntry请求
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+	} else {
+		//更新当前任期并更新过期时间
+		rf.currentTerm = reply.Term
+		reply.Term = rf.currentTerm
+		reply.Success = true
+	}
 }
 
 //
@@ -226,6 +257,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -315,7 +351,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu.Lock()
 	rf.role = Follower
 	rf.currentTerm = 0
-	rf.lastHearBeat = time.Now().UnixNano() / 1e6
+	rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + HeartBeatTimeoutInterval
 	rf.voteFor = -1
 	rf.mu.Unlock()
 	//leader定时发送心跳
@@ -329,9 +365,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func() {
 		for true {
 			rf.heartbeatTimeout()
-			//随机超时时间
-			timeout := HeartbeatTimeout + rand.Intn(50)
-			time.Sleep(time.Duration(timeout) * time.Millisecond)
+			time.Sleep(time.Duration(10) * time.Millisecond)
 		}
 	}()
 
@@ -345,10 +379,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 }
 
 func (rf *Raft) startHeartbeat() {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.role == Leader {
-		rf.sendHeartbeat()
+		for i := 0; i < len(rf.peers); i++ {
+			go func(i int, rf *Raft) {
+				args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
+				reply := AppendEntriesReply{}
+				rf.sendAppendEntries(i, &args, &reply)
+			}(i, rf)
+		}
 	}
 }
 
@@ -356,30 +396,23 @@ func (rf *Raft) heartbeatTimeout() {
 	//rf.mu.Lock()
 	//defer rf.mu.Unlock()
 	now := time.Now().UnixNano() / 1e6
-	if now-rf.lastHearBeat > HeartbeatTimeout {
+	if rf.role == Leader {
+		return
+	}
+	if now > rf.heartBeatTimeout {
 		fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
-		//修改用户的任期，需要加锁
-		switch rf.role {
-		case Leader:
-			//rf.role = Candidate
-		case Follower, Candidate:
-			rf.role = Candidate
-			rf.currentTerm++
-			//fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
-			//发送选举给其他服务器
-			rf.sendHeartbeat()
-		}
+		rf.role = Candidate
+		rf.currentTerm++
+		rf.voteFor = rf.me
+		rf.heartBeatTimeout = now + HeartBeatTimeoutInterval
+		//fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
+		//发送选举给其他服务器
+		rf.requestVote()
 	}
 }
 
-func (rf *Raft) sendHeartbeat() {
+func (rf *Raft) requestVote() {
 	fmt.Printf("send heartbeat ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
-	rf.mu.Lock()
-	//更新本地的心跳时间
-	rf.lastHearBeat = time.Now().UnixNano() / 1e6
-	//投票给自己
-	rf.voteFor = rf.me
-	rf.mu.Unlock()
 	//var wg sync.WaitGroup
 	voteChan := make(chan bool, 1)
 	//包含自己的票数
