@@ -19,6 +19,7 @@ package raft
 
 import (
 	"fmt"
+	"math/rand"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -183,7 +184,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if args.Term > rf.currentTerm || rf.voteFor == -1 || rf.voteFor == args.CandidateId {
 		reply.VoteGrant = true
 		reply.Term = args.Term
-		rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + HeartBeatTimeoutInterval
+		//随机超时时间150~300
+		rand := 150 + rand.Int63n(150)
+		rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + rand
 		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.voteFor = args.CandidateId
@@ -220,7 +223,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 	} else {
 		//更新当前任期并更新过期时间
-		rf.currentTerm = reply.Term
+		rf.currentTerm = args.Term
 		reply.Term = rf.currentTerm
 		now := time.Now().UnixNano() / 1e6
 		rf.heartBeatTimeout = now + HeartBeatTimeoutInterval
@@ -356,13 +359,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + HeartBeatTimeoutInterval
 	rf.voteFor = -1
 	rf.mu.Unlock()
-	//leader定时发送心跳
-	go func() {
-		for true {
-			rf.startHeartbeat()
-			time.Sleep(HeartbeatInterval * time.Millisecond)
-		}
-	}()
 	//心跳超时检测
 	go func() {
 		for true {
@@ -380,11 +376,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-func (rf *Raft) startHeartbeat() {
+func (rf *Raft) sendHeartbeat() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.role == Leader {
-		for i := 0; i < len(rf.peers); i++ {
+	for i := 0; i < len(rf.peers); i++ {
+		//自己不需要发送心跳
+		if i != rf.me {
 			go func(i int, currentTerm int) {
 				args := AppendEntriesArgs{Term: currentTerm, LeaderId: rf.me}
 				reply := AppendEntriesReply{}
@@ -406,7 +403,9 @@ func (rf *Raft) heartbeatTimeout() {
 		rf.role = Candidate
 		rf.currentTerm++
 		rf.voteFor = rf.me
-		rf.heartBeatTimeout = now + HeartBeatTimeoutInterval
+		//随机超时时间150~300
+		rand := 150 + rand.Int63n(150)
+		rf.heartBeatTimeout = now + rand
 		//fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		//发送选举给其他服务器
 		rf.requestVote()
@@ -447,11 +446,16 @@ func (rf *Raft) requestVote() {
 			voteCnt++
 			if voteCnt > len(rf.peers)/2 {
 				rf.mu.Lock()
-				if rf.role != Leader {
-					rf.role = Leader
-					fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-				}
+				rf.role = Leader
+				fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
 				rf.mu.Unlock()
+				//成为leader，开始定时发送心跳
+				go func() {
+					for rf.role == Leader {
+						rf.sendHeartbeat()
+						time.Sleep(HeartbeatInterval * time.Millisecond)
+					}
+				}()
 				//过半数结点同意就可以提前退出
 				return
 			}
