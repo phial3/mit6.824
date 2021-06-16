@@ -157,8 +157,8 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term         int
 	CandidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -192,7 +192,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGrant = false
 		reply.Term = args.Term
 	}
-	fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
+	//fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
 }
 
 //重新设置超时选举时钟
@@ -228,6 +228,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Success = false
 	} else {
 		//更新当前任期并更新过期时间
+		rf.role = Follower
 		rf.currentTerm = args.Term
 		rf.resetTimeout()
 		reply.Term = rf.currentTerm
@@ -360,7 +361,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu.Lock()
 	rf.role = Follower
 	rf.currentTerm = 0
-	rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + HeartBeatTimeoutInterval
+	rf.resetTimeout()
 	rf.voteFor = -1
 	rf.mu.Unlock()
 	//心跳超时检测
@@ -403,7 +404,7 @@ func (rf *Raft) heartbeatTimeout() {
 		return
 	}
 	if now > rf.heartBeatTimeout {
-		fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+		//fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 		rf.role = Candidate
 		rf.currentTerm++
 		//给自己投票并更新心跳超时时钟
@@ -429,7 +430,7 @@ func (rf *Raft) requestVote() chan bool {
 			reply := RequestVoteReply{}
 			if i != rf.me {
 				resp := rf.sendRequestVote(i, &args, &reply)
-				fmt.Printf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, resp)
+				fmt.Printf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, reply.VoteGrant)
 				if resp && reply.VoteGrant {
 					voteChan <- true
 				} else {
