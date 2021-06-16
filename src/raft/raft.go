@@ -184,9 +184,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if args.Term > rf.currentTerm || rf.voteFor == -1 || rf.voteFor == args.CandidateId {
 		reply.VoteGrant = true
 		reply.Term = args.Term
-		//随机超时时间150~300
-		rand := 150 + rand.Int63n(150)
-		rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + rand
+		rf.resetTimeout()
 		rf.currentTerm = args.Term
 		rf.role = Follower
 		rf.voteFor = args.CandidateId
@@ -195,6 +193,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.Term = args.Term
 	}
 	fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
+}
+
+//重新设置超时选举时钟
+func (rf *Raft) resetTimeout() {
+	//随机超时时间150~300
+	rand := 150 + rand.Int63n(150)
+	rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + rand
 }
 
 type LogEntry struct {
@@ -224,9 +229,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		//更新当前任期并更新过期时间
 		rf.currentTerm = args.Term
+		rf.resetTimeout()
 		reply.Term = rf.currentTerm
-		now := time.Now().UnixNano() / 1e6
-		rf.heartBeatTimeout = now + HeartBeatTimeoutInterval
 		reply.Success = true
 	}
 }
@@ -402,26 +406,26 @@ func (rf *Raft) heartbeatTimeout() {
 		fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 		rf.role = Candidate
 		rf.currentTerm++
+		//给自己投票并更新心跳超时时钟
 		rf.voteFor = rf.me
-		//随机超时时间150~300
-		rand := 150 + rand.Int63n(150)
-		rf.heartBeatTimeout = now + rand
+		rf.resetTimeout()
 		//fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		//发送选举给其他服务器
-		rf.requestVote()
+		vote := rf.requestVote()
+		rf.receiveVote(vote)
 	}
 }
 
-func (rf *Raft) requestVote() {
-	fmt.Printf("send heartbeat ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+func (rf *Raft) requestVote() chan bool {
+	fmt.Printf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//var wg sync.WaitGroup
-	voteChan := make(chan bool, 1)
+	voteChan := make(chan bool, len(rf.peers))
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
 	for i := 0; i < len(rf.peers); i++ {
-		go func(i int, currentTerm int) {
-			fmt.Printf("send request vote...candidateId:%d,to:%d\n", rf.me, i)
-			args := RequestVoteArgs{Term: currentTerm, CandidateId: rf.me}
+		go func(i int, term int) {
+			fmt.Printf("send request vote...candidateId:%d,to:%d,term:%d\n", rf.me, i, term)
+			args := RequestVoteArgs{Term: term, CandidateId: rf.me}
 			reply := RequestVoteReply{}
 			if i != rf.me {
 				resp := rf.sendRequestVote(i, &args, &reply)
@@ -437,14 +441,17 @@ func (rf *Raft) requestVote() {
 			}
 		}(i, rf.currentTerm)
 	}
-	//用chan来进行多线程之间的数据交互，确实简单很多，而且不需要考虑并发的问题
-	voteCnt := 0
+	return voteChan
+}
+
+func (rf *Raft) receiveVote(vote chan bool) {
+	cnt := 0
 	for i := 0; i < len(rf.peers); i++ {
-		vote, ok := <-voteChan
+		vote, ok := <-vote
 		//fmt.Printf("get vote:%t\n", vote)
 		if ok && vote {
-			voteCnt++
-			if voteCnt > len(rf.peers)/2 {
+			cnt++
+			if cnt > len(rf.peers)/2 {
 				rf.mu.Lock()
 				rf.role = Leader
 				fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
