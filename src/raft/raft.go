@@ -179,10 +179,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if args.Term < rf.currentTerm {
-		reply.VoteGrant = false
-		reply.Term = rf.currentTerm
-	} else if args.Term > rf.currentTerm || rf.voteFor == -1 || rf.voteFor == args.CandidateId {
+	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.voteFor == -1) {
 		reply.VoteGrant = true
 		reply.Term = args.Term
 		rf.resetTimeout()
@@ -370,7 +367,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		}
 	}()
 	go func() {
-		for  {
+		for {
 			//监听心跳开启事件
 			<-rf.heartBeatChan
 			for rf.sendHeartbeat() {
