@@ -177,8 +177,8 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.VoteGrant = false
 		reply.Term = rf.currentTerm
@@ -222,8 +222,8 @@ type AppendEntriesReply struct {
 
 //接收appendEntry请求
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	//rf.mu.Lock()
-	//defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -333,9 +333,6 @@ func (rf *Raft) ticker() {
 	}
 }
 
-//心跳超时
-const HeartbeatTimeout = 150
-
 //心跳时间间隔
 const HeartbeatInterval = 50
 
@@ -352,7 +349,6 @@ const HeartbeatInterval = 50
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	fmt.Printf("raft start...server:%d\n", me)
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -365,6 +361,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetTimeout()
 	rf.voteFor = -1
 	rf.mu.Unlock()
+	rf.heartBeatChan = make(chan bool)
 	//心跳超时检测
 	go func() {
 		for true {
@@ -372,22 +369,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			time.Sleep(time.Duration(10) * time.Millisecond)
 		}
 	}()
-
-	select {
-	case <-rf.heartBeatChan:
-		go func() {
+	go func() {
+		for  {
+			//监听心跳开启事件
+			<-rf.heartBeatChan
 			for rf.sendHeartbeat() {
 				time.Sleep(HeartbeatInterval * time.Millisecond)
 			}
-		}()
-	}
-
+		}
+	}()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
+	fmt.Printf("raft start...server:%d\n", me)
 	return rf
 }
 
@@ -433,7 +429,6 @@ func (rf *Raft) heartbeatTimeout() {
 
 func (rf *Raft) requestVote() chan bool {
 	fmt.Printf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
-	//var wg sync.WaitGroup
 	voteChan := make(chan bool, len(rf.peers))
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
@@ -462,9 +457,9 @@ func (rf *Raft) requestVote() chan bool {
 func (rf *Raft) receiveVote(vote chan bool) {
 	cnt := 0
 	for i := 0; i < len(rf.peers); i++ {
-		r := <-vote
-		//fmt.Printf("get vote:%t\n", vote)
-		if r {
+		r, ok := <-vote
+		fmt.Printf("get vote:%t\n", r)
+		if r && ok {
 			cnt++
 			if cnt > len(rf.peers)/2 {
 				rf.role = Leader
