@@ -401,8 +401,16 @@ func (rf *Raft) sendHeartbeat() {
 		//自己不需要发送心跳
 		if i != rf.me {
 			go func(i int) {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
 				reply := AppendEntriesReply{}
-				rf.sendAppendEntries(i, &args, &reply)
+				ok := rf.sendAppendEntries(i, &args, &reply)
+				if ok && reply.Term > rf.currentTerm {
+					rf.currentTerm = reply.Term
+					rf.voteFor = -1
+					rf.role = Follower
+					rf.resetTimeout()
+				}
 			}(i)
 		}
 	}
@@ -429,45 +437,55 @@ func (rf *Raft) leaderElection() {
 	}
 }
 
-func (rf *Raft) requestVote() chan bool {
+type VoteResult struct {
+	peerId int
+	reply  *RequestVoteReply
+}
+
+func (rf *Raft) requestVote() chan VoteResult {
 	fmt.Printf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
-	voteChan := make(chan bool, len(rf.peers))
+	voteChan := make(chan VoteResult, len(rf.peers))
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
+	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
 	for i := 0; i < len(rf.peers); i++ {
-		go func(i int, term int) {
-			fmt.Printf("send request vote...candidateId:%d,to:%d,term:%d\n", rf.me, i, term)
-			args := RequestVoteArgs{Term: term, CandidateId: rf.me}
+		go func(i int) {
 			reply := RequestVoteReply{}
 			if i != rf.me {
+				fmt.Printf("send request vote...candidateId:%d,to:%d,term:%d\n", rf.me, i, args.Term)
 				resp := rf.sendRequestVote(i, &args, &reply)
 				fmt.Printf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, reply.VoteGrant)
-				if resp && reply.VoteGrant {
-					voteChan <- true
+				if resp {
+					voteChan <- VoteResult{peerId: i, reply: &reply}
 				} else {
-					voteChan <- false
+					voteChan <- VoteResult{peerId: i, reply: nil}
 				}
-			} else {
-				//自己直接投票成功
-				voteChan <- true
 			}
-		}(i, rf.currentTerm)
+		}(i)
 	}
 	return voteChan
 }
 
-func (rf *Raft) receiveVote(vote chan bool) {
-	cnt := 0
+func (rf *Raft) receiveVote(vote chan VoteResult) {
+	//算上自己本身的一票
+	cnt := 1
 	for i := 0; i < len(rf.peers); i++ {
-		r, ok := <-vote
-		fmt.Printf("get vote:%t\n", r)
-		if r && ok {
-			cnt++
-			if cnt > len(rf.peers)/2 {
-				rf.role = Leader
-				fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-				//过半数结点同意就可以提前退出
-				return
+		res := <-vote
+		//fmt.Printf("get vote:%t\n", r)
+		if res.reply != nil {
+			if res.reply.VoteGrant {
+				cnt++
+				if cnt > len(rf.peers)/2 {
+					rf.role = Leader
+					fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
+					//过半数结点同意就可以提前退出
+					return
+				}
+			} else if res.reply.Term > rf.currentTerm {
+				//被投票的term还要更高，主动降为follow，加速整个投票的过程
+				rf.role = Follower
+				rf.currentTerm = res.reply.Term
+				rf.voteFor = -1
 			}
 		}
 	}
