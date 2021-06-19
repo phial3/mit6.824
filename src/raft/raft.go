@@ -478,7 +478,9 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 func (rf *Raft) receiveVote(vote chan VoteResult) {
 	//算上自己本身的一票
 	cnt := 1
-	end := false
+	rf.mu.Lock()
+	maxTerm := rf.currentTerm
+	rf.mu.Unlock()
 	for i := 1; i < len(rf.peers); i++ {
 		fmt.Printf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
 		select {
@@ -490,24 +492,37 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 				if res.reply != nil {
 					if res.reply.VoteGrant {
 						cnt++
-						if cnt > len(rf.peers)/2 {
-							rf.role = Leader
-							fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-							//过半数结点同意就可以提前退出
-							end = true
-						}
-					} else if res.reply.Term > rf.currentTerm {
-						//被投票的term还要更高，主动降为follow，加速整个投票的过程
-						rf.role = Follower
-						rf.currentTerm = res.reply.Term
-						rf.voteFor = -1
+					} else if res.reply.Term > maxTerm {
+						maxTerm = res.reply.Term
 					}
 				}
 			}()
-			//提前结束
-			if end {
-				return
-			}
+		}
+		//提前结束
+		if cnt > len(rf.peers)/2 {
+			break
 		}
 	}
+	func() {
+		rf.mu.Lock()
+		defer func() {
+			fmt.Printf("request vote[finish]...serverId:%d,term:%d,vote:%d,maxTerm:%d\n", rf.me, rf.currentTerm, cnt, maxTerm)
+			rf.mu.Unlock()
+		}()
+		//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
+		if rf.role != Candidate {
+			return
+		}
+		//被投票的term还要更高，主动降为follow，加速整个投票的过程
+		if maxTerm > rf.currentTerm {
+			rf.role = Follower
+			rf.currentTerm = maxTerm
+			rf.voteFor = -1
+			return
+		}
+		if cnt > len(rf.peers)/2 {
+			rf.role = Leader
+			fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
+		}
+	}()
 }
