@@ -59,8 +59,6 @@ const (
 	Leader
 )
 
-const HeartBeatTimeoutInterval = 300
-
 //
 // A Go object implementing a single Raft peer.
 //
@@ -78,8 +76,10 @@ type Raft struct {
 	voteFor     int
 	//角色
 	role int
-	//心跳过期时间
-	heartBeatTimeout int64
+	//选举定时器
+	electionTimeout int64
+	//心跳定时器(leader才会使用这个定时器)
+	heartbeatTimeout int64
 }
 
 // return currentTerm and whether this server
@@ -207,7 +207,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) resetTimeout() {
 	//随机超时时间150~300
 	rand := 150 + rand.Int63n(150)
-	rf.heartBeatTimeout = time.Now().UnixNano()/1e6 + rand
+	rf.electionTimeout = time.Now().UnixNano()/1e6 + rand
 }
 
 type LogEntry struct {
@@ -378,7 +378,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	go func() {
 		for !rf.killed() {
 			rf.sendHeartbeat()
-			time.Sleep(HeartbeatInterval * time.Millisecond)
+			time.Sleep(1 * time.Millisecond)
 		}
 	}()
 	// initialize from state persisted before a crash
@@ -393,9 +393,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) sendHeartbeat() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.role != Leader {
+	now := time.Now().UnixNano() / 1e6
+	if rf.role != Leader || now >= rf.heartbeatTimeout {
 		return
 	}
+	//更新下一次发送心跳时间
+	rf.heartbeatTimeout = now + HeartbeatInterval
 	fmt.Printf("send heatbeat[start]...serverid:%d,term:%d\n", rf.me, rf.currentTerm)
 	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
 	for i := 0; i < len(rf.peers); i++ {
@@ -425,7 +428,7 @@ func (rf *Raft) leaderElection() {
 	voteChan := make(chan VoteResult, len(rf.peers))
 	now := time.Now().UnixNano() / 1e6
 	rf.mu.Lock()
-	if rf.role == Leader || now <= rf.heartBeatTimeout {
+	if rf.role == Leader || now <= rf.electionTimeout {
 		rf.mu.Unlock()
 		return
 	}
@@ -522,6 +525,8 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 		}
 		if cnt > len(rf.peers)/2 {
 			rf.role = Leader
+			//更新心跳时间，尽快触发发送心跳
+			rf.heartbeatTimeout = time.Now().UnixNano() / 1e6
 			fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		}
 	}()
