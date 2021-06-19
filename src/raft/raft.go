@@ -402,16 +402,19 @@ func (rf *Raft) sendHeartbeat() {
 		//自己不需要发送心跳
 		if i != rf.me {
 			go func(i int) {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				//rpc的过程不能加锁
+				//rf.mu.Lock()
+				//defer rf.mu.Unlock()
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(i, &args, &reply)
+				rf.mu.Lock()
 				if ok && reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.voteFor = -1
 					rf.role = Follower
 					rf.resetTimeout()
 				}
+				rf.mu.Unlock()
 			}(i)
 		}
 	}
@@ -475,30 +478,35 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 func (rf *Raft) receiveVote(vote chan VoteResult) {
 	//算上自己本身的一票
 	cnt := 1
+	end := false
 	for i := 1; i < len(rf.peers); i++ {
 		fmt.Printf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
 		select {
 		case res := <-vote:
-			fmt.Printf("get vote\n")
-			if res.reply != nil {
-				if res.reply.VoteGrant {
-					cnt++
-					if cnt > len(rf.peers)/2 {
-						rf.mu.Lock()
-						rf.role = Leader
-						rf.mu.Unlock()
-						fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-						//过半数结点同意就可以提前退出
-						return
+			func() {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				fmt.Printf("get vote\n")
+				if res.reply != nil {
+					if res.reply.VoteGrant {
+						cnt++
+						if cnt > len(rf.peers)/2 {
+							rf.role = Leader
+							fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
+							//过半数结点同意就可以提前退出
+							end = true
+						}
+					} else if res.reply.Term > rf.currentTerm {
+						//被投票的term还要更高，主动降为follow，加速整个投票的过程
+						rf.role = Follower
+						rf.currentTerm = res.reply.Term
+						rf.voteFor = -1
 					}
-				} else if res.reply.Term > rf.currentTerm {
-					//被投票的term还要更高，主动降为follow，加速整个投票的过程
-					rf.mu.Lock()
-					rf.role = Follower
-					rf.currentTerm = res.reply.Term
-					rf.voteFor = -1
-					rf.mu.Unlock()
 				}
+			}()
+			//提前结束
+			if end {
+				return
 			}
 		}
 	}
