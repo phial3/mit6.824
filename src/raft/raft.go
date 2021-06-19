@@ -190,7 +190,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	//只有当当前任期没有投票才能投
 	if rf.voteFor == -1 || rf.voteFor == args.CandidateId {
-		rf.resetTimeout()
+		rf.resetElectionTimeout()
 		rf.role = Follower
 		rf.voteFor = args.CandidateId
 
@@ -204,9 +204,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 //重新设置超时选举时钟
-func (rf *Raft) resetTimeout() {
+func (rf *Raft) resetElectionTimeout() {
 	//随机超时时间150~300
-	rand := 150 + rand.Int63n(150)
+	rand := MinElectionTimeout + rand.Int63n(MaxElectionTimeout-MinElectionTimeout)
 	rf.electionTimeout = time.Now().UnixNano()/1e6 + rand
 }
 
@@ -238,7 +238,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//更新当前任期并更新过期时间
 		rf.role = Follower
 		rf.currentTerm = args.Term
-		rf.resetTimeout()
+		rf.resetElectionTimeout()
 		reply.Term = rf.currentTerm
 		reply.Success = true
 	}
@@ -341,7 +341,11 @@ func (rf *Raft) ticker() {
 }
 
 //心跳时间间隔
-const HeartbeatInterval = 10
+const HeartbeatInterval = 100
+
+//选举超时随机范围
+const MinElectionTimeout = 150
+const MaxElectionTimeout = 300
 
 //
 // the service or tester wants to create a Raft server. the ports
@@ -365,7 +369,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu.Lock()
 	rf.role = Follower
 	rf.currentTerm = 0
-	rf.resetTimeout()
+	rf.resetElectionTimeout()
 	rf.voteFor = -1
 	rf.mu.Unlock()
 	//心跳超时检测
@@ -415,7 +419,7 @@ func (rf *Raft) sendHeartbeat() {
 					rf.currentTerm = reply.Term
 					rf.voteFor = -1
 					rf.role = Follower
-					rf.resetTimeout()
+					rf.resetElectionTimeout()
 				}
 				rf.mu.Unlock()
 			}(i)
@@ -441,7 +445,7 @@ func (rf *Raft) leaderElection() {
 		rf.currentTerm++
 		//给自己投票并更新心跳超时时钟
 		rf.voteFor = rf.me
-		rf.resetTimeout()
+		rf.resetElectionTimeout()
 		//fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		//发送选举给其他服务器
 		rf.requestVote(voteChan)
