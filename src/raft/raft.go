@@ -331,12 +331,12 @@ func (rf *Raft) killed() bool {
 // The ticker go routine starts a new election if this peer hasn't received
 // heartsbeats recently.
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
-
+	for !rf.killed() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-
+		rf.leaderElection()
+		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
 
@@ -372,17 +372,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.resetElectionTimeout()
 	rf.voteFor = -1
 	rf.mu.Unlock()
-	//心跳超时检测
-	go func() {
-		for !rf.killed() {
-			rf.leaderElection()
-			time.Sleep(time.Duration(10) * time.Millisecond)
-		}
-	}()
 	go func() {
 		for !rf.killed() {
 			rf.sendHeartbeat()
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 	// initialize from state persisted before a crash
