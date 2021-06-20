@@ -80,6 +80,10 @@ type Raft struct {
 	electionTimeout int64
 	//心跳定时器(leader才会使用这个定时器)
 	heartbeatTimeout int64
+
+	//log
+	log         []LogEntry
+	commitIndex int
 }
 
 // return currentTerm and whether this server
@@ -212,13 +216,15 @@ func (rf *Raft) resetElectionTimeout() {
 
 type LogEntry struct {
 	//TODO:entry格式
+	term    int
+	command interface{}
 }
 type AppendEntriesArgs struct {
 	Term         int
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []LogEntry
+	Entries      []interface{}
 	LeaderCommit int
 }
 
@@ -283,6 +289,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+type AppendEntryResult struct {
+	peerId int
+	reply  *AppendEntriesReply
+}
+
 //
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -303,7 +314,47 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role != Leader {
+		return index, term, isLeader
+	}
+	//先写入本地
+	prevLogIndex := -1
+	prevLogTerm := -1
+	if len(rf.log) > 0 {
+		prevLogIndex = len(rf.log) - 1
+		prevLogTerm = rf.log[prevLogIndex].term
+	}
+	//同步到其他副本
+	rf.log = append(rf.log, LogEntry{term: rf.currentTerm, command: command})
+	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
+		PrevLogTerm: prevLogTerm, Entries: []interface{}{command}, LeaderCommit: rf.commitIndex}
+	replyChan := make(chan AppendEntryResult, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(peerId int) {
+			reply := AppendEntriesReply{}
+			if ok := rf.sendAppendEntries(i, &arg, &reply); ok {
+				replyChan <- AppendEntryResult{peerId: peerId, reply: &reply}
+			} else {
+				replyChan <- AppendEntryResult{peerId: peerId, reply: nil}
+			}
+		}(i)
+	}
+	cnt := 0
+	for i := 1; i < len(rf.peers); i++ {
+		res := <-replyChan
+		if res.reply != nil && res.reply.Success {
+			cnt++
+		}
+		if cnt > len(rf.peers)/2 {
+			break
+		}
+	}
+	//TODO:结果处理
 	return index, term, isLeader
 }
 
@@ -371,6 +422,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.resetElectionTimeout()
 	rf.voteFor = -1
+
+	//lab2B
+	rf.log = make([]LogEntry, 100)
+	rf.commitIndex = -1
 	rf.mu.Unlock()
 	go func() {
 		for !rf.killed() {
