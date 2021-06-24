@@ -84,6 +84,8 @@ type Raft struct {
 	//log
 	log         []LogEntry
 	commitIndex int
+	nextIndex   []int
+	matchIndex  []int
 }
 
 // return currentTerm and whether this server
@@ -237,17 +239,24 @@ type AppendEntriesReply struct {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	reply.Term = rf.currentTerm
+	reply.Success = false
 	if args.Term < rf.currentTerm {
-		reply.Term = rf.currentTerm
-		reply.Success = false
-	} else {
-		//更新当前任期并更新过期时间
-		rf.role = Follower
-		rf.currentTerm = args.Term
-		rf.resetElectionTimeout()
-		reply.Term = rf.currentTerm
-		reply.Success = true
+		return
 	}
+	//更新本地日志
+	if args.PrevLogIndex >= 0 {
+		if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].term != args.PrevLogTerm {
+			return
+		}
+	}
+	rf.log = append(rf.log, LogEntry{args.Term, args.Entries})
+	//更新当前任期并更新过期时间
+	rf.role = Follower
+	rf.currentTerm = args.Term
+	rf.resetElectionTimeout()
+	reply.Term = rf.currentTerm
+	reply.Success = true
 }
 
 //
@@ -309,15 +318,11 @@ type AppendEntryResult struct {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.role != Leader {
-		return index, term, isLeader
+		rf.mu.Unlock()
+		return -1, -1, false
 	}
 	//先写入本地
 	prevLogIndex := -1
@@ -326,36 +331,66 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		prevLogIndex = len(rf.log) - 1
 		prevLogTerm = rf.log[prevLogIndex].term
 	}
-	//同步到其他副本
-	rf.log = append(rf.log, LogEntry{term: rf.currentTerm, command: command})
-	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
-		PrevLogTerm: prevLogTerm, Entries: []interface{}{command}, LeaderCommit: rf.commitIndex}
-	replyChan := make(chan AppendEntryResult, len(rf.peers))
+	entry := LogEntry{term: rf.currentTerm, command: command}
+	rf.log = append(rf.log, entry)
+	logLen := len(rf.log)
+	rf.mu.Unlock()
+	//同步到其他副本，根据每个副本的next index进行同步，这是由于每个副本的进度都有可能不相同
+	replyChan := make(chan bool, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
-		go func(peerId int) {
-			reply := AppendEntriesReply{}
-			if ok := rf.sendAppendEntries(i, &arg, &reply); ok {
-				replyChan <- AppendEntryResult{peerId: peerId, reply: &reply}
-			} else {
-				replyChan <- AppendEntryResult{peerId: peerId, reply: nil}
+		go func(peerId int, logLen int) {
+			for rf.nextIndex[peerId] < len(rf.log) {
+				rf.mu.Lock()
+				if rf.role != Leader {
+					rf.mu.Unlock()
+					replyChan <- false
+					return
+				}
+				rf.mu.Unlock()
+				arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
+					PrevLogTerm: prevLogTerm, Entries: []interface{}{command}, LeaderCommit: rf.commitIndex}
+				reply := AppendEntriesReply{}
+				if ok := rf.sendAppendEntries(peerId, &arg, &reply); ok {
+					if reply.Success {
+						rf.mu.Lock()
+						rf.nextIndex[peerId]++
+						rf.matchIndex[peerId]++
+						rf.mu.Unlock()
+					} else {
+						//nextIndex回退一步
+						rf.mu.Lock()
+						rf.nextIndex[peerId]--
+						rf.matchIndex[peerId]--
+						rf.mu.Unlock()
+					}
+				}
+				//请求超时继续发送请求
 			}
-		}(i)
+			replyChan <- true
+		}(i, logLen)
 	}
-	cnt := 0
+	cnt := 1
 	for i := 1; i < len(rf.peers); i++ {
 		res := <-replyChan
-		if res.reply != nil && res.reply.Success {
+		if res {
 			cnt++
 		}
 		if cnt > len(rf.peers)/2 {
 			break
 		}
 	}
-	//TODO:结果处理
-	return index, term, isLeader
+	//结果处理
+	return func() (int, int, bool) {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.role != Leader {
+			return -1, -1, false
+		}
+		return logLen - 1, entry.term, true
+	}()
 }
 
 //
@@ -398,6 +433,8 @@ const HeartbeatInterval = 100
 const MinElectionTimeout = 150
 const MaxElectionTimeout = 300
 
+const LogInitSize = 1000
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -424,8 +461,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.voteFor = -1
 
 	//lab2B
-	rf.log = make([]LogEntry, 100)
+	rf.log = make([]LogEntry, 0, LogInitSize)
 	rf.commitIndex = -1
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		rf.matchIndex[i] = -1
+	}
 	rf.mu.Unlock()
 	go func() {
 		for !rf.killed() {
