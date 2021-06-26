@@ -217,7 +217,6 @@ func (rf *Raft) resetElectionTimeout() {
 }
 
 type LogEntry struct {
-	//TODO:entry格式
 	term    int
 	command interface{}
 }
@@ -226,7 +225,7 @@ type AppendEntriesArgs struct {
 	LeaderId     int
 	PrevLogIndex int
 	PrevLogTerm  int
-	Entries      []interface{}
+	Entries      []LogEntry
 	LeaderCommit int
 }
 
@@ -250,7 +249,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			return
 		}
 	}
-	rf.log = append(rf.log, LogEntry{args.Term, args.Entries})
+	for _, entry := range args.Entries {
+		rf.log = append(rf.log, entry)
+	}
 	//更新当前任期并更新过期时间
 	rf.role = Follower
 	rf.currentTerm = args.Term
@@ -318,6 +319,7 @@ type AppendEntryResult struct {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	fmt.Printf("request[start]...peerid:%d\n", rf.me)
 	// Your code here (2B).
 	rf.mu.Lock()
 	if rf.role != Leader {
@@ -325,12 +327,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 	//先写入本地
-	prevLogIndex := -1
-	prevLogTerm := -1
-	if len(rf.log) > 0 {
-		prevLogIndex = len(rf.log) - 1
-		prevLogTerm = rf.log[prevLogIndex].term
-	}
 	entry := LogEntry{term: rf.currentTerm, command: command}
 	rf.log = append(rf.log, entry)
 	logLen := len(rf.log)
@@ -342,32 +338,28 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			continue
 		}
 		go func(peerId int, logLen int) {
-			for rf.nextIndex[peerId] < len(rf.log) {
-				rf.mu.Lock()
-				if rf.role != Leader {
-					rf.mu.Unlock()
-					replyChan <- false
-					return
-				}
+			args := rf.makeAppendEntryArgs(peerId)
+			rf.mu.Lock()
+			if rf.role != Leader {
 				rf.mu.Unlock()
-				arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
-					PrevLogTerm: prevLogTerm, Entries: []interface{}{command}, LeaderCommit: rf.commitIndex}
-				reply := AppendEntriesReply{}
-				if ok := rf.sendAppendEntries(peerId, &arg, &reply); ok {
-					if reply.Success {
-						rf.mu.Lock()
-						rf.nextIndex[peerId]++
-						rf.matchIndex[peerId]++
-						rf.mu.Unlock()
-					} else {
-						//nextIndex回退一步
-						rf.mu.Lock()
-						rf.nextIndex[peerId]--
-						rf.matchIndex[peerId]--
-						rf.mu.Unlock()
-					}
+				replyChan <- false
+				return
+			}
+			rf.mu.Unlock()
+			reply := AppendEntriesReply{}
+			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
+				if reply.Success {
+					rf.mu.Lock()
+					rf.nextIndex[peerId]++
+					rf.matchIndex[peerId]++
+					rf.mu.Unlock()
+				} else {
+					//nextIndex回退一步
+					rf.mu.Lock()
+					rf.nextIndex[peerId]--
+					rf.matchIndex[peerId]--
+					rf.mu.Unlock()
 				}
-				//请求超时继续发送请求
 			}
 			replyChan <- true
 		}(i, logLen)
@@ -484,6 +476,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	prevLogIndex := rf.matchIndex[peerId]
+	prevLogTerm := -1
+	if prevLogIndex >= 0 {
+		prevLogTerm = rf.log[prevLogIndex].term
+	}
+	var entries []LogEntry
+	if prevLogIndex+1 < len(rf.log) {
+		entries = rf.log[prevLogIndex+1:]
+	}
+	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
+		PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
+	return arg
+}
+
 func (rf *Raft) sendHeartbeat() {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -494,16 +503,16 @@ func (rf *Raft) sendHeartbeat() {
 	//更新下一次发送心跳时间
 	rf.heartbeatTimeout = now + HeartbeatInterval
 	fmt.Printf("send heatbeat[start]...serverid:%d,term:%d\n", rf.me, rf.currentTerm)
-	args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
 	for i := 0; i < len(rf.peers); i++ {
 		//自己不需要发送心跳
 		if i != rf.me {
-			go func(i int) {
+			go func(peerId int) {
 				//rpc的过程不能加锁
 				//rf.mu.Lock()
 				//defer rf.mu.Unlock()
 				reply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(i, &args, &reply)
+				args := rf.makeAppendEntryArgs(peerId)
+				ok := rf.sendAppendEntries(peerId, &args, &reply)
 				rf.mu.Lock()
 				if ok && reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
