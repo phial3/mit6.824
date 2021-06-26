@@ -237,18 +237,21 @@ type AppendEntriesReply struct {
 //接收appendEntry请求
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	fmt.Printf("append entry receive[start]...peerId:%d\n", rf.me)
 	reply.Term = rf.currentTerm
 	reply.Success = false
+	defer func() {
+		rf.mu.Unlock()
+		fmt.Printf("append entry receive[finish]...peerId:%d,success:%t\n", rf.me, reply.Success)
+	}()
 	if args.Term < rf.currentTerm {
 		return
 	}
-	//更新本地日志
-	if args.PrevLogIndex >= 0 {
-		if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-			return
-		}
+	//日志校验
+	if args.PrevLogIndex >= 0 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		return
 	}
+	//更新本地日志
 	for _, entry := range args.Entries {
 		rf.log = append(rf.log, entry)
 	}
@@ -386,6 +389,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		if rf.role != Leader {
 			return -1, -1, false
 		}
+		rf.commitIndex = logLen - 1
 		return logLen - 1, entry.Term, true
 	}()
 }
