@@ -217,8 +217,8 @@ func (rf *Raft) resetElectionTimeout() {
 }
 
 type LogEntry struct {
-	term    int
-	command interface{}
+	Term    int
+	Command interface{}
 }
 type AppendEntriesArgs struct {
 	Term         int
@@ -245,7 +245,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//更新本地日志
 	if args.PrevLogIndex >= 0 {
-		if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].term != args.PrevLogTerm {
+		if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			return
 		}
 	}
@@ -320,6 +320,9 @@ type AppendEntryResult struct {
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	fmt.Printf("request[start]...peerid:%d\n", rf.me)
+	defer func() {
+		fmt.Printf("request[finish]...peerid:%d\n", rf.me)
+	}()
 	// Your code here (2B).
 	rf.mu.Lock()
 	if rf.role != Leader {
@@ -327,22 +330,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 	//先写入本地
-	entry := LogEntry{term: rf.currentTerm, command: command}
+	entry := LogEntry{Term: rf.currentTerm, Command: command}
 	rf.log = append(rf.log, entry)
 	logLen := len(rf.log)
 	rf.mu.Unlock()
 	//同步到其他副本，根据每个副本的next index进行同步，这是由于每个副本的进度都有可能不相同
-	replyChan := make(chan bool, len(rf.peers))
+	replyChan := make(chan AppendEntryResult, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
-		go func(peerId int, logLen int) {
+		go func(peerId int) {
 			args := rf.makeAppendEntryArgs(peerId)
 			rf.mu.Lock()
 			if rf.role != Leader {
 				rf.mu.Unlock()
-				replyChan <- false
+				replyChan <- AppendEntryResult{peerId: peerId, reply: nil}
 				return
 			}
 			rf.mu.Unlock()
@@ -360,14 +363,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					rf.matchIndex[peerId]--
 					rf.mu.Unlock()
 				}
+				replyChan <- AppendEntryResult{peerId, &reply}
+			} else {
+				replyChan <- AppendEntryResult{peerId, nil}
 			}
-			replyChan <- true
-		}(i, logLen)
+		}(i)
 	}
 	cnt := 1
 	for i := 1; i < len(rf.peers); i++ {
 		res := <-replyChan
-		if res {
+		if res.reply != nil && res.reply.Success {
 			cnt++
 		}
 		if cnt > len(rf.peers)/2 {
@@ -381,7 +386,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		if rf.role != Leader {
 			return -1, -1, false
 		}
-		return logLen - 1, entry.term, true
+		return logLen - 1, entry.Term, true
 	}()
 }
 
@@ -482,7 +487,7 @@ func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
 	prevLogIndex := rf.matchIndex[peerId]
 	prevLogTerm := -1
 	if prevLogIndex >= 0 {
-		prevLogTerm = rf.log[prevLogIndex].term
+		prevLogTerm = rf.log[prevLogIndex].Term
 	}
 	var entries []LogEntry
 	if prevLogIndex+1 < len(rf.log) {
