@@ -242,7 +242,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = false
 	defer func() {
 		rf.mu.Unlock()
-		fmt.Printf("append entry receive[finish]...peerId:%d,success:%t\n", rf.me, reply.Success)
+		fmt.Printf("append entry receive[finish]...peerId:%d,success:%t,logLen:%d,commitIdx:%d\n", rf.me, reply.Success, len(rf.log), rf.commitIndex)
 	}()
 	if args.Term < rf.currentTerm {
 		return
@@ -255,6 +255,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for _, entry := range args.Entries {
 		rf.log = append(rf.log, entry)
 	}
+	//更新commitIndex
+	rf.commitIndex = args.LeaderCommit
 	//更新当前任期并更新过期时间
 	rf.role = Follower
 	rf.currentTerm = args.Term
@@ -324,7 +326,9 @@ type AppendEntryResult struct {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	fmt.Printf("request[start]...peerid:%d\n", rf.me)
 	defer func() {
-		fmt.Printf("request[finish]...peerid:%d\n", rf.me)
+		rf.mu.Lock()
+		fmt.Printf("request[finish]...peerid:%d,logLen:%d,commitIdx:%d\n", rf.me, len(rf.log), rf.commitIndex)
+		rf.mu.Unlock()
 	}()
 	// Your code here (2B).
 	rf.mu.Lock()
@@ -515,7 +519,7 @@ func (rf *Raft) sendHeartbeat() {
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		//自己不需要发送心跳
-		if i != rf.me {
+		if i == rf.me {
 			continue
 		}
 		go func(peerId int) {
