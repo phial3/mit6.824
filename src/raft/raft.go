@@ -504,34 +504,36 @@ func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
 
 func (rf *Raft) sendHeartbeat() {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	now := time.Now().UnixNano() / 1e6
-	if rf.role != Leader || now >= rf.heartbeatTimeout {
+	if rf.role != Leader || now < rf.heartbeatTimeout {
+		rf.mu.Unlock()
 		return
 	}
 	//更新下一次发送心跳时间
 	rf.heartbeatTimeout = now + HeartbeatInterval
 	fmt.Printf("send heatbeat[start]...serverid:%d,term:%d\n", rf.me, rf.currentTerm)
+	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		//自己不需要发送心跳
 		if i != rf.me {
-			go func(peerId int) {
-				//rpc的过程不能加锁
-				//rf.mu.Lock()
-				//defer rf.mu.Unlock()
-				reply := AppendEntriesReply{}
-				args := rf.makeAppendEntryArgs(peerId)
-				ok := rf.sendAppendEntries(peerId, &args, &reply)
-				rf.mu.Lock()
-				if ok && reply.Term > rf.currentTerm {
-					rf.currentTerm = reply.Term
-					rf.voteFor = -1
-					rf.role = Follower
-					rf.resetElectionTimeout()
-				}
-				rf.mu.Unlock()
-			}(i)
+			continue
 		}
+		go func(peerId int) {
+			//rpc的过程不能加锁
+			//rf.mu.Lock()
+			//defer rf.mu.Unlock()
+			reply := AppendEntriesReply{}
+			args := rf.makeAppendEntryArgs(peerId)
+			ok := rf.sendAppendEntries(peerId, &args, &reply)
+			rf.mu.Lock()
+			if ok && reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.voteFor = -1
+				rf.role = Follower
+				rf.resetElectionTimeout()
+			}
+			rf.mu.Unlock()
+		}(i)
 	}
 }
 
@@ -548,7 +550,7 @@ func (rf *Raft) leaderElection() {
 	func() {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		fmt.Printf("heartbeat timeout...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+		fmt.Printf("start election...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 		rf.role = Candidate
 		rf.currentTerm++
 		//给自己投票并更新心跳超时时钟
