@@ -86,6 +86,8 @@ type Raft struct {
 	commitIndex int
 	nextIndex   []int
 	matchIndex  []int
+	//lab2b测试需要
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -254,6 +256,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//更新本地日志
 	for _, entry := range args.Entries {
 		rf.log = append(rf.log, entry)
+		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: len(rf.log) - 1}
+		rf.applyCh <- applyMsg
 	}
 	//更新commitIndex
 	rf.commitIndex = args.LeaderCommit
@@ -394,6 +398,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			return -1, -1, false
 		}
 		rf.commitIndex = logLen - 1
+		//通知cfg
+		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: rf.commitIndex}
+		rf.applyCh <- applyMsg
 		return logLen - 1, entry.Term, true
 	}()
 }
@@ -464,6 +471,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.currentTerm = 0
 	rf.resetElectionTimeout()
 	rf.voteFor = -1
+	//测试用例
+	rf.applyCh = applyCh
 
 	//lab2B
 	rf.log = make([]LogEntry, 0, LogInitSize)
