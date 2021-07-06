@@ -474,13 +474,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//测试用例
 	rf.applyCh = applyCh
 
-	//lab2B
+	//lab2B，这里有个关键点，log的序号是从1开始的，所以这里要填一个0来补
 	rf.log = make([]LogEntry, 0, LogInitSize)
-	rf.commitIndex = -1
+	rf.log = append(rf.log, LogEntry{Term: 0, Command: 0})
+	rf.commitIndex = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
-		rf.matchIndex[i] = -1
+		rf.matchIndex[i] = 0
 	}
 	rf.mu.Unlock()
 	go func() {
