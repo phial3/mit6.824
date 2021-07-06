@@ -18,7 +18,6 @@ package raft
 //
 
 import (
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -208,7 +207,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGrant = false
 		reply.Term = args.Term
 	}
-	fmt.Printf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
+	DPrintf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
 }
 
 //重新设置超时选举时钟
@@ -239,12 +238,12 @@ type AppendEntriesReply struct {
 //接收appendEntry请求
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	fmt.Printf("append entry receive[start]...peerId:%d\n", rf.me)
+	DPrintf("append entry receive[start]...peerId:%d\n", rf.me)
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	defer func() {
 		rf.mu.Unlock()
-		fmt.Printf("append entry receive[finish]...peerId:%d,success:%t,logLen:%d,commitIdx:%d\n", rf.me, reply.Success, len(rf.log), rf.commitIndex)
+		DPrintf("append entry receive[finish]...peerId:%d,success:%t,logLen:%d,commitIdx:%d\n", rf.me, reply.Success, len(rf.log), rf.commitIndex)
 	}()
 	if args.Term < rf.currentTerm {
 		return
@@ -328,10 +327,10 @@ type AppendEntryResult struct {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	fmt.Printf("request[start]...peerid:%d\n", rf.me)
+	DPrintf("request[start]...peerid:%d\n", rf.me)
 	defer func() {
 		rf.mu.Lock()
-		fmt.Printf("request[finish]...peerid:%d,logLen:%d,commitIdx:%d\n", rf.me, len(rf.log), rf.commitIndex)
+		DPrintf("request[finish]...peerid:%d,logLen:%d,commitIdx:%d\n", rf.me, len(rf.log), rf.commitIndex)
 		rf.mu.Unlock()
 	}()
 	// Your code here (2B).
@@ -495,7 +494,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	fmt.Printf("raft start...server:%d\n", me)
+	DPrintf("raft start...server:%d\n", me)
 	return rf
 }
 
@@ -525,7 +524,7 @@ func (rf *Raft) sendHeartbeat() {
 	}
 	//更新下一次发送心跳时间
 	rf.heartbeatTimeout = now + HeartbeatInterval
-	fmt.Printf("send heatbeat[start]...serverid:%d,term:%d\n", rf.me, rf.currentTerm)
+	DPrintf("send heatbeat[start]...serverid:%d,term:%d\n", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		//自己不需要发送心跳
@@ -564,13 +563,12 @@ func (rf *Raft) leaderElection() {
 	func() {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		fmt.Printf("start election...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+		DPrintf("start election...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 		rf.role = Candidate
 		rf.currentTerm++
 		//给自己投票并更新心跳超时时钟
 		rf.voteFor = rf.me
 		rf.resetElectionTimeout()
-		//fmt.Printf("sendRequest vote...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		//发送选举给其他服务器
 		rf.requestVote(voteChan)
 	}()
@@ -584,7 +582,7 @@ type VoteResult struct {
 }
 
 func (rf *Raft) requestVote(voteChan chan VoteResult) {
-	fmt.Printf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+	DPrintf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
 	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
@@ -594,9 +592,9 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 		}
 		go func(i int) {
 			reply := RequestVoteReply{}
-			fmt.Printf("send request vote...candidateId:%d,to:%d,term:%d\n", rf.me, i, args.Term)
+			DPrintf("send request vote...candidateId:%d,to:%d,term:%d\n", rf.me, i, args.Term)
 			resp := rf.sendRequestVote(i, &args, &reply)
-			fmt.Printf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, reply.VoteGrant)
+			DPrintf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, reply.VoteGrant)
 			if resp {
 				voteChan <- VoteResult{peerId: i, reply: &reply}
 			} else {
@@ -613,13 +611,13 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 	maxTerm := rf.currentTerm
 	rf.mu.Unlock()
 	for i := 1; i < len(rf.peers); i++ {
-		fmt.Printf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
+		DPrintf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
 		select {
 		case res := <-vote:
 			func() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				fmt.Printf("get vote\n")
+				DPrintf("get vote\n")
 				if res.reply != nil {
 					if res.reply.VoteGrant {
 						cnt++
@@ -637,7 +635,7 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 	func() {
 		rf.mu.Lock()
 		defer func() {
-			fmt.Printf("request vote[finish]...serverId:%d,term:%d,vote:%d,maxTerm:%d\n", rf.me, rf.currentTerm, cnt, maxTerm)
+			DPrintf("request vote[finish]...serverId:%d,term:%d,vote:%d,maxTerm:%d\n", rf.me, rf.currentTerm, cnt, maxTerm)
 			rf.mu.Unlock()
 		}()
 		//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
@@ -655,7 +653,7 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 			rf.role = Leader
 			//更新心跳时间，尽快触发发送心跳
 			rf.heartbeatTimeout = time.Now().UnixNano() / 1e6
-			fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
+			DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		}
 	}()
 }
