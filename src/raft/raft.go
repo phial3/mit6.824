@@ -250,6 +250,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//日志校验
 	if args.PrevLogIndex >= 0 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+		DPrintf("log not match...peerId:%d\n", rf.me)
 		return
 	}
 	//更新本地日志
@@ -327,7 +328,7 @@ type AppendEntryResult struct {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	DPrintf("request[start]...peerid:%d\n", rf.me)
+	DPrintf("request[start]...peerId:%d,command:%d\n", rf.me, command)
 	defer func() {
 		rf.mu.Lock()
 		DPrintf("request[finish]...peerid:%d,logLen:%d,commitIdx:%d\n", rf.me, len(rf.log), rf.commitIndex)
@@ -512,6 +513,7 @@ func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
 	}
 	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
 		PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
+	DPrintf("build appendEntry...peerId:%d,leaderId:%d,prevLogIndex:%d,commitIndex:%d\n", peerId, rf.me, prevLogIndex, rf.commitIndex)
 	return arg
 }
 
