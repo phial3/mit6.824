@@ -184,10 +184,19 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		DPrintf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
+		rf.mu.Unlock()
+	}()
+	reply.VoteGrant = false
+	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		reply.VoteGrant = false
-		reply.Term = rf.currentTerm
+		return
+	}
+	//检查日志是否一致
+	lastLogIdx := len(rf.log) - 1
+	if args.LastLogIndex != lastLogIdx || args.LastLogTerm != rf.log[lastLogIdx].Term {
+		DPrintf("log not match,request vote fail")
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -203,11 +212,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 		reply.VoteGrant = true
 		reply.Term = args.Term
-	} else {
-		reply.VoteGrant = false
-		reply.Term = args.Term
 	}
-	DPrintf("receive vote...serverId:%d,candidate:%d,currentTerm:%d,Term:%d,reply:%t\n", rf.me, args.CandidateId, rf.currentTerm, args.Term, reply.VoteGrant)
 }
 
 //重新设置超时选举时钟
@@ -329,16 +334,19 @@ type AppendEntryResult struct {
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	DPrintf("request[start]...peerId:%d,command:%d\n", rf.me, command)
+	logIdx := -1
+	logTerm := -1
+	success := false
 	defer func() {
 		rf.mu.Lock()
-		DPrintf("request[finish]...peerid:%d,logLen:%d,commitIdx:%d\n", rf.me, len(rf.log), rf.commitIndex)
+		DPrintf("request[finish]...peerId:%d,logLen:%d,commitIdx:%d,success:%t\n", rf.me, len(rf.log), rf.commitIndex, success)
 		rf.mu.Unlock()
 	}()
 	// Your code here (2B).
 	rf.mu.Lock()
 	if rf.role != Leader {
 		rf.mu.Unlock()
-		return -1, -1, false
+		return logIdx, logTerm, success
 	}
 	//先写入本地
 	entry := LogEntry{Term: rf.currentTerm, Command: command}
@@ -395,13 +403,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		if rf.role != Leader {
-			return -1, -1, false
+			return logIdx, logTerm, success
 		}
+		logIdx = logLen - 1
+		logTerm = entry.Term
+		success = true
 		rf.commitIndex = logLen - 1
 		//通知cfg
 		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: rf.commitIndex}
 		rf.applyCh <- applyMsg
-		return logLen - 1, entry.Term, true
+		return logIdx, logTerm, success
 	}()
 }
 
