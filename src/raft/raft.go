@@ -193,10 +193,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		return
 	}
-	//检查日志是否一致
+	//检查日志是否更新
+	//Raft determines which of two logs is more up-to-date
+	//by comparing the index and term of the last entries in the
+	//logs. If the logs have last entries with different terms, then
+	//the log with the later term is more up-to-date. If the logs
+	//end with the same term, then whichever log is longer is
+	//more up-to-date.
 	lastLogIdx := len(rf.log) - 1
-	if args.LastLogIndex != lastLogIdx || args.LastLogTerm != rf.log[lastLogIdx].Term {
-		DPrintf("log not match,request vote fail")
+	if args.LastLogTerm < rf.log[lastLogIdx].Term || (args.LastLogTerm == rf.log[lastLogIdx].Term && args.LastLogIndex < lastLogIdx) {
+		DPrintf("candidate log term is older...arg.lastLogTerm:%d,current lastLogTerm:%d,args.LastLogIndex:%d,lastLogIdx:%d", args.LastLogTerm, rf.log[lastLogIdx].Term, args.LastLogIndex, lastLogIdx)
 		return
 	}
 	if args.Term > rf.currentTerm {
@@ -598,7 +604,8 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 	DPrintf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
-	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me}
+	lastLogIdx := len(rf.log) - 1
+	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIdx, LastLogTerm: rf.log[lastLogIdx].Term}
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
