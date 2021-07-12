@@ -249,7 +249,7 @@ type AppendEntriesReply struct {
 //接收appendEntry请求
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-	DPrintf("append entry receive[start]...peerId:%d\n", rf.me)
+	DPrintf("append entry receive[start]...peerId:%d,args:%+v\n", rf.me, *args)
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	defer func() {
@@ -257,6 +257,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("append entry receive[finish]...peerId:%d,success:%t,logLen:%d,commitIdx:%d\n", rf.me, reply.Success, len(rf.log), rf.commitIndex)
 	}()
 	if args.Term < rf.currentTerm {
+		DPrintf("term not match...arg.term:%d,currentTerm:%d", args.Term, rf.currentTerm)
 		return
 	}
 	//日志校验
@@ -264,7 +265,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("log not match...peerId:%d\n", rf.me)
 		return
 	}
-	//更新本地日志
+	//更新/覆盖本地日志
+	//删除后面的log
+	rf.log = rf.log[0 : args.PrevLogIndex+1]
 	for _, entry := range args.Entries {
 		rf.log = append(rf.log, entry)
 		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: len(rf.log) - 1}
@@ -378,14 +381,21 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
 				if reply.Success {
 					rf.mu.Lock()
-					rf.nextIndex[peerId]++
-					rf.matchIndex[peerId]++
+					rf.matchIndex[peerId] = args.PrevLogIndex + len(args.Entries)
+					rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
 					rf.mu.Unlock()
 				} else {
-					//nextIndex回退一步
 					rf.mu.Lock()
-					rf.nextIndex[peerId]--
-					rf.matchIndex[peerId]--
+					if reply.Term > rf.currentTerm {
+						//变为follow，重新选举
+						rf.role = Follower
+						rf.currentTerm = args.Term
+						rf.resetElectionTimeout()
+					} else {
+						//nextIndex回退一步
+						rf.nextIndex[peerId]--
+						rf.matchIndex[peerId]--
+					}
 					rf.mu.Unlock()
 				}
 				replyChan <- AppendEntryResult{peerId, &reply}
@@ -558,11 +568,22 @@ func (rf *Raft) sendHeartbeat() {
 			args := rf.makeAppendEntryArgs(peerId)
 			ok := rf.sendAppendEntries(peerId, &args, &reply)
 			rf.mu.Lock()
-			if ok && reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.voteFor = -1
-				rf.role = Follower
-				rf.resetElectionTimeout()
+			if ok {
+				if reply.Success {
+					rf.matchIndex[peerId] = args.PrevLogIndex + len(args.Entries)
+					rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
+				} else {
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+						rf.voteFor = -1
+						rf.role = Follower
+						rf.resetElectionTimeout()
+					} else {
+						//nextIndex回退一步
+						rf.nextIndex[peerId]--
+						rf.matchIndex[peerId]--
+					}
+				}
 			}
 			rf.mu.Unlock()
 		}(i)
