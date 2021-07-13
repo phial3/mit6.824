@@ -83,8 +83,10 @@ type Raft struct {
 	//log
 	log         []LogEntry
 	commitIndex int
-	nextIndex   []int
-	matchIndex  []int
+	//关于nextIndex和matchIndex的说明，这个问题也困扰了我好久，为什么不只保留一个nextIndex/matchIndex。不是必须，但是从理解角度会更直观
+	//https://stackoverflow.com/questions/46376293/what-is-lastapplied-and-matchindex-in-raft-protocol-for-volatile-state-in-server
+	nextIndex  []int
+	matchIndex []int
 	//lab2b测试需要
 	applyCh chan ApplyMsg
 }
@@ -372,7 +374,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry := LogEntry{Term: rf.currentTerm, Command: command}
 	rf.log = append(rf.log, entry)
 	logLen := len(rf.log)
+	//更新logIdx和logTem
+	logIdx = logLen - 1
+	logTerm = rf.currentTerm
+	success = true
 	rf.mu.Unlock()
+	//这里不需要等过半数结点提交成功？为什么，那么客户端如何知道这个数据已经成功复制到过半数结点了?
+	return logIdx, logTerm, success
 	//同步到其他副本，根据每个副本的next index进行同步，这是由于每个副本的进度都有可能不相同
 	replyChan := make(chan AppendEntryResult, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
@@ -405,7 +413,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 					} else {
 						//nextIndex回退一步
 						rf.nextIndex[peerId]--
-						rf.matchIndex[peerId]--
+						//rf.matchIndex[peerId]--
 					}
 					rf.mu.Unlock()
 				}
@@ -429,7 +437,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	return func() (int, int, bool) {
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
-		if rf.role != Leader {
+		if rf.role != Leader || cnt <= len(rf.peers)/2 {
 			return logIdx, logTerm, success
 		}
 		logIdx = logLen - 1
@@ -440,6 +448,63 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: rf.commitIndex}
 		rf.applyCh <- applyMsg
 		return logIdx, logTerm, success
+	}()
+}
+
+func (rf *Raft) broadcastEntry() {
+	//同步到其他副本，根据每个副本的next index进行同步，这是由于每个副本的进度都有可能不相同
+	wg := sync.WaitGroup{}
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		wg.Add(1)
+		go func(peerId int) {
+			args := rf.makeAppendEntryArgs(peerId)
+			defer func() {
+				wg.Done()
+			}()
+			rf.mu.Lock()
+			if rf.role != Leader {
+				rf.mu.Unlock()
+				return
+			}
+			rf.mu.Unlock()
+			reply := AppendEntriesReply{}
+			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
+				if reply.Success {
+					rf.mu.Lock()
+					rf.matchIndex[peerId] = args.PrevLogIndex + len(args.Entries)
+					rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
+					rf.mu.Unlock()
+				} else {
+					rf.mu.Lock()
+					if reply.Term > rf.currentTerm {
+						//变为follow，重新选举
+						rf.role = Follower
+						rf.currentTerm = args.Term
+						rf.resetElectionTimeout()
+					} else {
+						//nextIndex回退一步
+						rf.nextIndex[peerId]--
+					}
+					rf.mu.Unlock()
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+	//结果处理
+	return func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.role != Leader || cnt <= len(rf.peers)/2 {
+			return
+		}
+		rf.commitIndex = logLen - 1
+		//通知cfg
+		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: rf.commitIndex}
+		rf.applyCh <- applyMsg
 	}()
 }
 
@@ -518,9 +583,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++ {
-		rf.matchIndex[i] = 0
-	}
+	rf.initNextIndex()
 	rf.mu.Unlock()
 	go func() {
 		for !rf.killed() {
@@ -537,20 +600,28 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
+//nextIndex[] for each server, index of the next log entry
+//to send to that server (initialized to leader
+//last log index + 1)
+//matchIndex[] for each server, index of highest log entry
+//known to be replicated on server
+//(initialized to 0, increases monotonically)
+func (rf *Raft) initNextIndex() {
+	for i := 0; i < len(rf.peers); i++ {
+		rf.matchIndex[i] = 0
+		rf.nextIndex[i] = len(rf.log) - 1
+	}
+}
+
 func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	prevLogIndex := rf.matchIndex[peerId]
-	prevLogTerm := -1
-	if prevLogIndex >= 0 {
-		prevLogTerm = rf.log[prevLogIndex].Term
-	}
-	var entries []LogEntry
-	if prevLogIndex+1 < len(rf.log) {
-		entries = rf.log[prevLogIndex+1:]
-	}
+	nextIdx := rf.nextIndex[peerId]
+	//下标从1开始的好处来了
+	prevLogIndex := nextIdx - 1
+	prevLogTerm := rf.log[prevLogIndex].Term
 	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
-		PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
+		PrevLogTerm: prevLogTerm, Entries: rf.log[nextIdx:], LeaderCommit: rf.commitIndex}
 	DPrintf("build appendEntry...peerId:%d,leaderId:%d,prevLogIndex:%d,commitIndex:%d\n", peerId, rf.me, prevLogIndex, rf.commitIndex)
 	return arg
 }
@@ -592,7 +663,7 @@ func (rf *Raft) sendHeartbeat() {
 					} else {
 						//nextIndex回退一步
 						rf.nextIndex[peerId]--
-						rf.matchIndex[peerId]--
+						//rf.matchIndex[peerId]--
 					}
 				}
 			}
@@ -705,6 +776,8 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 			rf.role = Leader
 			//更新心跳时间，尽快触发发送心跳
 			rf.heartbeatTimeout = time.Now().UnixNano() / 1e6
+			//更新nextIndex
+			rf.initNextIndex()
 			DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		}
 	}()
