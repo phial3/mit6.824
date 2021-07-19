@@ -379,90 +379,32 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	logTerm = rf.currentTerm
 	success = true
 	rf.mu.Unlock()
+	go func() {
+		rf.broadcastEntry(logIdx)
+	}()
 	//这里不需要等过半数结点提交成功？为什么，那么客户端如何知道这个数据已经成功复制到过半数结点了?
 	return logIdx, logTerm, success
-	//同步到其他副本，根据每个副本的next index进行同步，这是由于每个副本的进度都有可能不相同
-	replyChan := make(chan AppendEntryResult, len(rf.peers))
-	for i := 0; i < len(rf.peers); i++ {
-		if i == rf.me {
-			continue
-		}
-		go func(peerId int) {
-			args := rf.makeAppendEntryArgs(peerId)
-			rf.mu.Lock()
-			if rf.role != Leader {
-				rf.mu.Unlock()
-				replyChan <- AppendEntryResult{peerId: peerId, reply: nil}
-				return
-			}
-			rf.mu.Unlock()
-			reply := AppendEntriesReply{}
-			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
-				if reply.Success {
-					rf.mu.Lock()
-					rf.matchIndex[peerId] = args.PrevLogIndex + len(args.Entries)
-					rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
-					rf.mu.Unlock()
-				} else {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						//变为follow，重新选举
-						rf.role = Follower
-						rf.currentTerm = args.Term
-						rf.resetElectionTimeout()
-					} else {
-						//nextIndex回退一步
-						rf.nextIndex[peerId]--
-						//rf.matchIndex[peerId]--
-					}
-					rf.mu.Unlock()
-				}
-				replyChan <- AppendEntryResult{peerId, &reply}
-			} else {
-				replyChan <- AppendEntryResult{peerId, nil}
-			}
-		}(i)
-	}
-	cnt := 1
-	for i := 1; i < len(rf.peers); i++ {
-		res := <-replyChan
-		if res.reply != nil && res.reply.Success {
-			cnt++
-		}
-		if cnt > len(rf.peers)/2 {
-			break
-		}
-	}
-	//结果处理
-	return func() (int, int, bool) {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if rf.role != Leader || cnt <= len(rf.peers)/2 {
-			return logIdx, logTerm, success
-		}
-		logIdx = logLen - 1
-		logTerm = entry.Term
-		success = true
-		rf.commitIndex = logLen - 1
-		//通知cfg
-		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: rf.commitIndex}
-		rf.applyCh <- applyMsg
-		return logIdx, logTerm, success
-	}()
 }
 
-func (rf *Raft) broadcastEntry() {
+//考虑到并发，在并行发送前我们先确定当前的log index作为发送的最后的index。这样可以更简单的计算复制成功的index的数量。
+//发送[nextIndex,]
+func (rf *Raft) broadcastEntry(lastIdx int) {
+	defer func() {
+		rf.mu.Lock()
+		DPrintf("broadcastEntry[finish]...peerId:%d,logLen:%d,commitIndex:%d", rf.me, len(rf.log), rf.commitIndex)
+		rf.mu.Unlock()
+	}()
 	//同步到其他副本，根据每个副本的next index进行同步，这是由于每个副本的进度都有可能不相同
-	wg := sync.WaitGroup{}
+	appendChan := make(chan AppendEntryResult, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
-		wg.Add(1)
 		go func(peerId int) {
-			args := rf.makeAppendEntryArgs(peerId)
+			args := rf.makeAppendEntryArgs(peerId, lastIdx)
+			reply := AppendEntriesReply{}
 			defer func() {
-				wg.Done()
+				appendChan <- AppendEntryResult{peerId: peerId, reply: &reply}
 			}()
 			rf.mu.Lock()
 			if rf.role != Leader {
@@ -470,7 +412,6 @@ func (rf *Raft) broadcastEntry() {
 				return
 			}
 			rf.mu.Unlock()
-			reply := AppendEntriesReply{}
 			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
 				if reply.Success {
 					rf.mu.Lock()
@@ -493,19 +434,34 @@ func (rf *Raft) broadcastEntry() {
 			}
 		}(i)
 	}
-	wg.Wait()
-	//结果处理
-	return func() {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		if rf.role != Leader || cnt <= len(rf.peers)/2 {
-			return
+	//结果处理，这一段要好好理解一下
+	//• If there exists an N such that N > commitIndex, a majority
+	//of matchIndex[i] ≥ N, and log[N].term == currentTerm:
+	//set commitIndex = N (§5.3, §5.4)
+
+	//复制成功的副本数量
+	replica := 1
+	for i := 1; i < len(rf.peers); i++ {
+		res := <-appendChan
+		if res.reply != nil && res.reply.Success {
+			replica++
+			if replica > len(rf.peers)/2 {
+				rf.mu.Lock()
+				//并发的场景，有可能这时候的commit index已经被修改
+				if lastIdx > rf.commitIndex {
+					rf.commitIndex = lastIdx
+					//通知cfg
+					for i := rf.commitIndex + 1; i <= lastIdx; i++ {
+						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+						rf.applyCh <- applyMsg
+						DPrintf("log commit...peerId:%d,index:%d", rf.me, i)
+					}
+				}
+				rf.mu.Unlock()
+				return
+			}
 		}
-		rf.commitIndex = logLen - 1
-		//通知cfg
-		applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: rf.commitIndex}
-		rf.applyCh <- applyMsg
-	}()
+	}
 }
 
 //
@@ -609,19 +565,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) initNextIndex() {
 	for i := 0; i < len(rf.peers); i++ {
 		rf.matchIndex[i] = 0
-		rf.nextIndex[i] = len(rf.log) - 1
+		rf.nextIndex[i] = len(rf.log)
 	}
 }
 
-func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
+func (rf *Raft) makeAppendEntryArgs(peerId int, lastIdx int) AppendEntriesArgs {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	nextIdx := rf.nextIndex[peerId]
 	//下标从1开始的好处来了
 	prevLogIndex := nextIdx - 1
 	prevLogTerm := rf.log[prevLogIndex].Term
+	var entries []LogEntry
+	if nextIdx <= lastIdx {
+		entries = rf.log[nextIdx : lastIdx+1]
+	}
 	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
-		PrevLogTerm: prevLogTerm, Entries: rf.log[nextIdx:], LeaderCommit: rf.commitIndex}
+		PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
 	DPrintf("build appendEntry...peerId:%d,leaderId:%d,prevLogIndex:%d,commitIndex:%d\n", peerId, rf.me, prevLogIndex, rf.commitIndex)
 	return arg
 }
@@ -635,41 +595,9 @@ func (rf *Raft) sendHeartbeat() {
 	}
 	//更新下一次发送心跳时间
 	rf.heartbeatTimeout = now + HeartbeatInterval
-	DPrintf("send heatbeat[start]...serverid:%d,term:%d\n", rf.me, rf.currentTerm)
+	DPrintf("send heartbeat[start]...peerId:%d,term:%d\n", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
-	for i := 0; i < len(rf.peers); i++ {
-		//自己不需要发送心跳
-		if i == rf.me {
-			continue
-		}
-		go func(peerId int) {
-			//rpc的过程不能加锁
-			//rf.mu.Lock()
-			//defer rf.mu.Unlock()
-			reply := AppendEntriesReply{}
-			args := rf.makeAppendEntryArgs(peerId)
-			ok := rf.sendAppendEntries(peerId, &args, &reply)
-			rf.mu.Lock()
-			if ok {
-				if reply.Success {
-					rf.matchIndex[peerId] = args.PrevLogIndex + len(args.Entries)
-					rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
-				} else {
-					if reply.Term > rf.currentTerm {
-						rf.currentTerm = reply.Term
-						rf.voteFor = -1
-						rf.role = Follower
-						rf.resetElectionTimeout()
-					} else {
-						//nextIndex回退一步
-						rf.nextIndex[peerId]--
-						//rf.matchIndex[peerId]--
-					}
-				}
-			}
-			rf.mu.Unlock()
-		}(i)
-	}
+	rf.broadcastEntry(len(rf.log) - 1)
 }
 
 func (rf *Raft) leaderElection() {
