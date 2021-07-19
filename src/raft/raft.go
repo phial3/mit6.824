@@ -276,18 +276,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if rf.log[idx].Term != entry.Term {
 				rf.log = rf.log[0:idx]
 				rf.log = append(rf.log, entry)
-				applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: len(rf.log) - 1}
-				rf.applyCh <- applyMsg
 			}
 		} else {
 			rf.log = append(rf.log, entry)
-			applyMsg := ApplyMsg{CommandValid: true, Command: entry.Command, CommandIndex: len(rf.log) - 1}
-			rf.applyCh <- applyMsg
 		}
 		idx++
 	}
-	//更新commitIndex
-	rf.commitIndex = args.LeaderCommit
+	//更新commitIndex，这里需要判断下是不是来源于一个旧的请求
+	if args.LeaderCommit > rf.commitIndex {
+		for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
+			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+			rf.applyCh <- applyMsg
+			DPrintf("log commit...peerId:%d,index:%d", rf.me, i)
+		}
+		rf.commitIndex = args.LeaderCommit
+	}
 	//更新当前任期并更新过期时间
 	rf.role = Follower
 	rf.currentTerm = args.Term
@@ -379,9 +382,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	logTerm = rf.currentTerm
 	success = true
 	rf.mu.Unlock()
-	go func() {
-		rf.broadcastEntry(logIdx)
-	}()
+	rf.broadcastEntry(logIdx)
 	//这里不需要等过半数结点提交成功？为什么，那么客户端如何知道这个数据已经成功复制到过半数结点了?
 	return logIdx, logTerm, success
 }
@@ -449,13 +450,13 @@ func (rf *Raft) broadcastEntry(lastIdx int) {
 				rf.mu.Lock()
 				//并发的场景，有可能这时候的commit index已经被修改
 				if lastIdx > rf.commitIndex {
-					rf.commitIndex = lastIdx
 					//通知cfg
 					for i := rf.commitIndex + 1; i <= lastIdx; i++ {
 						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
 						rf.applyCh <- applyMsg
 						DPrintf("log commit...peerId:%d,index:%d", rf.me, i)
 					}
+					rf.commitIndex = lastIdx
 				}
 				rf.mu.Unlock()
 				return
