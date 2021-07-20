@@ -246,6 +246,11 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	//日志冲突加速同步，这样当一个term下面的冲突日志很多的情况下可以快速跳过一个term，而不需要一条一条跳过
+	//冲突的日志任期
+	ConflictLogTerm int
+	//冲突日志任期的第一个下标
+	ConflictLogFirstIdx int
 }
 
 //接收appendEntry请求
@@ -275,6 +280,18 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//日志校验
 	if args.PrevLogIndex >= 0 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		DPrintf("log not match...peerId:%d\n", rf.me)
+		if args.PrevLogIndex >= len(rf.log) {
+			reply.ConflictLogTerm = 0
+			reply.ConflictLogFirstIdx = len(rf.log) - 1
+		} else {
+			reply.ConflictLogTerm = rf.log[args.PrevLogIndex].Term
+			//找到该任期的第一个下标
+			idx := args.PrevLogIndex
+			for idx >= 1 && rf.log[idx].Term == reply.ConflictLogTerm {
+				idx--
+			}
+			reply.ConflictLogFirstIdx = idx + 1
+		}
 		return
 	}
 	//更新/覆盖本地日志，不能直接删除后面的日志
@@ -446,7 +463,28 @@ func (rf *Raft) broadcastEntry() {
 						rf.resetElectionTimeout()
 					} else {
 						//nextIndex回退一步
-						rf.nextIndex[peerId]--
+						//rf.nextIndex[peerId]--
+						//5.3 有针对性的优化逻辑
+						//If desired, the protocol can be optimized to reduce the
+						//number of rejected AppendEntries RPCs. For example,
+						//when rejecting an AppendEntries request, the follower
+						//can include the term of the conflicting entry and the first
+						//index it stores for that term. With this information, the
+						//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
+						//be required for each term with conflicting entries, rather
+						//than one RPC per entry. In practice, we doubt this optimization is necessary, since failures happen infrequently
+						//and it is unlikely that there will be many inconsistent entries.
+						idxBefore := rf.nextIndex[peerId]
+						if reply.ConflictLogTerm == 0 {
+							rf.nextIndex[peerId] = reply.ConflictLogFirstIdx
+						} else {
+							idx := args.PrevLogIndex
+							for idx >= reply.ConflictLogFirstIdx && rf.log[idx].Term != reply.ConflictLogTerm {
+								idx--
+							}
+							rf.nextIndex[peerId] = idx + 1
+						}
+						DPrintf("log not match...next index rollback...nextIndex:[%d],before:%d,after:%d", peerId, idxBefore, rf.nextIndex[peerId])
 					}
 					rf.mu.Unlock()
 				}
@@ -511,7 +549,7 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		rf.leaderElection()
+		go rf.leaderElection()
 		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
