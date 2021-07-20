@@ -255,13 +255,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	defer func() {
-		rf.mu.Unlock()
 		DPrintf("append entry receive[finish]...peerId:%d,success:%t,logLen:%d,commitIdx:%d\n", rf.me, reply.Success, len(rf.log), rf.commitIndex)
+		rf.mu.Unlock()
 	}()
 	if args.Term < rf.currentTerm {
 		DPrintf("term not match...arg.term:%d,currentTerm:%d", args.Term, rf.currentTerm)
 		return
 	}
+	//更新当前任期并更新过期时间，这里需要前置。看figure 2的描述。不然当日志不匹配的时候还是会发起一次新的选举
+	//All Servers:
+	//• If commitIndex > lastApplied: increment lastApplied, apply
+	//log[lastApplied] to state machine (§5.3)
+	//• If RPC request or response contains term T > currentTerm:
+	//set currentTerm = T, convert to follower (§5.1)
+	rf.role = Follower
+	rf.currentTerm = args.Term
+	rf.resetElectionTimeout()
+	DPrintf("turn to follower...peerId:%d", rf.me)
 	//日志校验
 	if args.PrevLogIndex >= 0 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		DPrintf("log not match...peerId:%d\n", rf.me)
@@ -291,10 +301,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.commitIndex = args.LeaderCommit
 	}
-	//更新当前任期并更新过期时间
-	rf.role = Follower
-	rf.currentTerm = args.Term
-	rf.resetElectionTimeout()
 	reply.Term = rf.currentTerm
 	reply.Success = true
 }
@@ -382,19 +388,30 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	logTerm = rf.currentTerm
 	success = true
 	rf.mu.Unlock()
-	rf.broadcastEntry(logIdx)
+	go rf.broadcastEntry()
 	//这里不需要等过半数结点提交成功？为什么，那么客户端如何知道这个数据已经成功复制到过半数结点了?
 	return logIdx, logTerm, success
 }
 
 //考虑到并发，在并行发送前我们先确定当前的log index作为发送的最后的index。这样可以更简单的计算复制成功的index的数量。
 //发送[nextIndex,]
-func (rf *Raft) broadcastEntry(lastIdx int) {
+func (rf *Raft) broadcastEntry() {
 	defer func() {
 		rf.mu.Lock()
 		DPrintf("broadcastEntry[finish]...peerId:%d,logLen:%d,commitIndex:%d", rf.me, len(rf.log), rf.commitIndex)
 		rf.mu.Unlock()
 	}()
+	rf.mu.Lock()
+	//统一在这里生成请求参数，保证每个请求的lastIdx和term在请求过程中不会被修改，起到一个类似快照的作用
+	lastIdx := len(rf.log) - 1
+	argArr := make([]AppendEntriesArgs, len(rf.peers))
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		argArr[i] = rf.makeAppendEntryArgs(i)
+	}
+	rf.mu.Unlock()
 	//同步到其他副本，根据每个副本的next index进行同步，这是由于每个副本的进度都有可能不相同
 	appendChan := make(chan AppendEntryResult, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
@@ -402,7 +419,8 @@ func (rf *Raft) broadcastEntry(lastIdx int) {
 			continue
 		}
 		go func(peerId int) {
-			args := rf.makeAppendEntryArgs(peerId, lastIdx)
+			//args := rf.makeAppendEntryArgs(peerId, lastIdx)
+			args := argArr[peerId]
 			reply := AppendEntriesReply{}
 			defer func() {
 				appendChan <- AppendEntryResult{peerId: peerId, reply: &reply}
@@ -570,19 +588,13 @@ func (rf *Raft) initNextIndex() {
 	}
 }
 
-func (rf *Raft) makeAppendEntryArgs(peerId int, lastIdx int) AppendEntriesArgs {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
 	nextIdx := rf.nextIndex[peerId]
 	//下标从1开始的好处来了
 	prevLogIndex := nextIdx - 1
 	prevLogTerm := rf.log[prevLogIndex].Term
-	var entries []LogEntry
-	if nextIdx <= lastIdx {
-		entries = rf.log[nextIdx : lastIdx+1]
-	}
 	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
-		PrevLogTerm: prevLogTerm, Entries: entries, LeaderCommit: rf.commitIndex}
+		PrevLogTerm: prevLogTerm, Entries: rf.log[nextIdx:], LeaderCommit: rf.commitIndex}
 	DPrintf("build appendEntry...peerId:%d,leaderId:%d,prevLogIndex:%d,commitIndex:%d\n", peerId, rf.me, prevLogIndex, rf.commitIndex)
 	return arg
 }
@@ -598,7 +610,8 @@ func (rf *Raft) sendHeartbeat() {
 	rf.heartbeatTimeout = now + HeartbeatInterval
 	DPrintf("send heartbeat[start]...peerId:%d,term:%d\n", rf.me, rf.currentTerm)
 	rf.mu.Unlock()
-	rf.broadcastEntry(len(rf.log) - 1)
+	//这里异步执行效率会更高，不然可能会影响到下一次心跳
+	go rf.broadcastEntry()
 }
 
 func (rf *Raft) leaderElection() {
