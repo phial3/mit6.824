@@ -207,19 +207,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		DPrintf("candidate log term is older...arg.lastLogTerm:%d,current lastLogTerm:%d,args.LastLogIndex:%d,lastLogIdx:%d", args.LastLogTerm, rf.log[lastLogIdx].Term, args.LastLogIndex, lastLogIdx)
 		return
 	}
-	if args.Term > rf.currentTerm {
+	//任期更大则以新的任期为准，否则相同任期的情况下先到先得
+	if args.Term > rf.currentTerm || (rf.voteFor == -1 || rf.voteFor == args.CandidateId) {
 		//更新任期等信息
-		rf.currentTerm = args.Term
-		rf.voteFor = -1
-	}
-	//只有当当前任期没有投票才能投
-	if rf.voteFor == -1 || rf.voteFor == args.CandidateId {
-		rf.resetElectionTimeout()
-		rf.role = Follower
+		//rf.currentTerm = args.Term
+		//rf.voteFor = -1
+		rf.switchFollower(args.Term)
 		rf.voteFor = args.CandidateId
 
 		reply.VoteGrant = true
 		reply.Term = args.Term
+		return
 	}
 }
 
@@ -273,9 +271,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//log[lastApplied] to state machine (§5.3)
 	//• If RPC request or response contains term T > currentTerm:
 	//set currentTerm = T, convert to follower (§5.1)
-	rf.role = Follower
-	rf.currentTerm = args.Term
-	rf.resetElectionTimeout()
+	if args.Term > rf.currentTerm {
+		//rf.role = Follower
+		//rf.currentTerm = args.Term
+		//rf.resetElectionTimeout()
+		rf.switchFollower(args.Term)
+	}
 	DPrintf("turn to follower...peerId:%d", rf.me)
 	//日志校验
 	if args.PrevLogIndex >= 0 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
@@ -458,9 +459,7 @@ func (rf *Raft) broadcastEntry() {
 					rf.mu.Lock()
 					if reply.Term > rf.currentTerm {
 						//变为follow，重新选举
-						rf.role = Follower
-						rf.currentTerm = args.Term
-						rf.resetElectionTimeout()
+						rf.switchFollower(reply.Term)
 					} else {
 						//nextIndex回退一步
 						//rf.nextIndex[peerId]--
@@ -583,10 +582,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.mu.Lock()
-	rf.role = Follower
-	rf.currentTerm = 0
-	rf.resetElectionTimeout()
-	rf.voteFor = -1
+	rf.switchFollower(0)
 	//测试用例
 	rf.applyCh = applyCh
 
@@ -707,6 +703,16 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 	}
 }
 
+// 转变成follower的逻辑很多，这里抽出来，避免改动的时候有遗漏
+//If RPC request or response contains term T > currentTerm:
+//set currentTerm = T, convert to follower (§5.1)
+func (rf *Raft) switchFollower(term int) {
+	rf.role = Follower
+	rf.currentTerm = term
+	rf.voteFor = -1
+	rf.resetElectionTimeout()
+}
+
 func (rf *Raft) receiveVote(vote chan VoteResult) {
 	//算上自己本身的一票
 	cnt := 1
@@ -720,7 +726,7 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 			func() {
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
-				DPrintf("get vote\n")
+				//DPrintf("get vote\n")
 				if res.reply != nil {
 					if res.reply.VoteGrant {
 						cnt++
@@ -747,9 +753,7 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 		}
 		//被投票的term还要更高，主动降为follow，加速整个投票的过程
 		if maxTerm > rf.currentTerm {
-			rf.role = Follower
-			rf.currentTerm = maxTerm
-			rf.voteFor = -1
+			rf.switchFollower(maxTerm)
 			return
 		}
 		if cnt > len(rf.peers)/2 {

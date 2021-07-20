@@ -51,7 +51,6 @@ package labrpc
 
 import (
 	"6.824/labgob"
-	"fmt"
 )
 import "bytes"
 import "reflect"
@@ -109,7 +108,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 		return false
 	case <-time.After(time.Duration(time.Microsecond * 500)):
 		//增加一个超时处理，不然rpc会导致整个选举卡死了
-		fmt.Printf("request timeout...\n")
+		//fmt.Printf("request timeout...\n")
 		return false
 	}
 
