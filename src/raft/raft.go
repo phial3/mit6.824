@@ -422,6 +422,8 @@ func (rf *Raft) broadcastEntry() {
 	rf.mu.Lock()
 	//统一在这里生成请求参数，保证每个请求的lastIdx和term在请求过程中不会被修改，起到一个类似快照的作用
 	lastIdx := len(rf.log) - 1
+	//做一个快照副本
+	currentTerm := rf.currentTerm
 	argArr := make([]AppendEntriesArgs, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -490,7 +492,7 @@ func (rf *Raft) broadcastEntry() {
 			}
 		}(i)
 	}
-	//结果处理，这一段要好好理解一下
+	//结果处理，这一段要好好理解一下，问题为什么只能提交当前的term呢？
 	//• If there exists an N such that N > commitIndex, a majority
 	//of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 	//set commitIndex = N (§5.3, §5.4)
@@ -504,7 +506,8 @@ func (rf *Raft) broadcastEntry() {
 			if replica > len(rf.peers)/2 {
 				rf.mu.Lock()
 				//并发的场景，有可能这时候的commit index已经被修改
-				if lastIdx > rf.commitIndex {
+				//这里还需要判断term，为什么，是为了解决什么问题？
+				if lastIdx > rf.commitIndex && currentTerm == rf.log[lastIdx].Term {
 					//通知cfg
 					for i := rf.commitIndex + 1; i <= lastIdx; i++ {
 						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
