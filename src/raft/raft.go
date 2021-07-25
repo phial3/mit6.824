@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -114,6 +116,15 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+
+	w := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(w)
+	encoder.Encode(rf.currentTerm)
+	encoder.Encode(rf.voteFor)
+	encoder.Encode(rf.log)
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -136,6 +147,22 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(r)
+	var currentTerm int
+	var voteFor int
+	var log []LogEntry
+	if decoder.Decode(&currentTerm) != nil ||
+		decoder.Decode(&voteFor) != nil || decoder.Decode(&log) != nil {
+		rf.currentTerm = currentTerm
+		rf.voteFor = voteFor
+		rf.log = log
+	} else {
+		rf.currentTerm = 0
+		rf.voteFor = -1
+		rf.log = log
+	}
 }
 
 //
@@ -310,6 +337,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		idx++
 	}
+	//lab2c
+	rf.persist()
 	//更新commitIndex，这里需要判断下是不是来源于一个旧的请求
 	if args.LeaderCommit > rf.commitIndex {
 		for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
@@ -401,6 +430,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	entry := LogEntry{Term: rf.currentTerm, Command: command}
 	rf.log = append(rf.log, entry)
 	logLen := len(rf.log)
+	//lab2C
+	rf.persist()
 	//更新logIdx和logTem
 	logIdx = logLen - 1
 	logTerm = rf.currentTerm
