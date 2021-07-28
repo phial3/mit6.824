@@ -119,11 +119,13 @@ func (rf *Raft) persist() {
 
 	w := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(w)
+	encoder.Encode(rf.role)
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.voteFor)
 	encoder.Encode(rf.log)
 
 	data := w.Bytes()
+	DPrintf("persist...peerId:%d", rf.me)
 	rf.persister.SaveRaftState(data)
 }
 
@@ -147,21 +149,23 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	r := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(r)
+	var role int
 	var currentTerm int
 	var voteFor int
 	var log []LogEntry
-	if decoder.Decode(&currentTerm) != nil ||
+	if decoder.Decode(&role) != nil || decoder.Decode(&currentTerm) != nil ||
 		decoder.Decode(&voteFor) != nil || decoder.Decode(&log) != nil {
+		DPrintf("read persist fail...peerId:%d", rf.me)
+	} else {
+		rf.role = role
 		rf.currentTerm = currentTerm
 		rf.voteFor = voteFor
 		rf.log = log
-	} else {
-		rf.currentTerm = 0
-		rf.voteFor = -1
-		rf.log = log
+		DPrintf("read persist success...peerId:%d,term:%d,voteFor:%d,role:%d,log.length:%d", rf.me, currentTerm, voteFor, role, len(log))
 	}
 }
 
@@ -616,7 +620,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.mu.Lock()
-	rf.switchFollower(0)
 	//测试用例
 	rf.applyCh = applyCh
 
@@ -634,6 +637,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
+	rf.switchFollower(0)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
@@ -700,6 +704,8 @@ func (rf *Raft) leaderElection() {
 		rf.currentTerm++
 		//给自己投票并更新心跳超时时钟
 		rf.voteFor = rf.me
+		//持久化
+		rf.persist()
 		rf.resetElectionTimeout()
 		//发送选举给其他服务器
 		rf.requestVote(voteChan)
@@ -744,6 +750,8 @@ func (rf *Raft) switchFollower(term int) {
 	rf.role = Follower
 	rf.currentTerm = term
 	rf.voteFor = -1
+	//持久化
+	rf.persist()
 	rf.resetElectionTimeout()
 }
 
@@ -796,6 +804,8 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 			rf.heartbeatTimeout = time.Now().UnixNano() / 1e6
 			//更新nextIndex
 			rf.initNextIndex()
+			//持久化
+			rf.persist()
 			DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		}
 	}()

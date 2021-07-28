@@ -8,7 +8,11 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"6.824/labgob"
+	"bytes"
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -639,6 +643,26 @@ func TestPersist12C(t *testing.T) {
 	cfg.one(16, servers, true)
 
 	cfg.end()
+}
+
+//编解码测试
+func TestEncode(t *testing.T) {
+	a := 1
+	b := 2
+	writer := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(writer)
+	encoder.Encode(a)
+	encoder.Encode(b)
+	data := writer.Bytes()
+	DPrintf("encode:%d", len(data))
+
+	reader := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(reader)
+	c := 0
+	decoder.Decode(&c)
+	DPrintf("decode:%d", c)
+	decoder.Decode(&c)
+	DPrintf("decode:%d", c)
 }
 
 func TestPersist22C(t *testing.T) {
