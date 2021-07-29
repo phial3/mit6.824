@@ -119,13 +119,12 @@ func (rf *Raft) persist() {
 
 	w := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(w)
-	encoder.Encode(rf.role)
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.voteFor)
 	encoder.Encode(rf.log)
 
 	data := w.Bytes()
-	DPrintf("persist...peerId:%d", rf.me)
+	DPrintf("persist...peerId:%d,log.length:%d", rf.me, len(rf.log))
 	rf.persister.SaveRaftState(data)
 }
 
@@ -153,19 +152,17 @@ func (rf *Raft) readPersist(data []byte) {
 	defer rf.mu.Unlock()
 	r := bytes.NewBuffer(data)
 	decoder := labgob.NewDecoder(r)
-	var role int
 	var currentTerm int
 	var voteFor int
 	var log []LogEntry
-	if decoder.Decode(&role) != nil || decoder.Decode(&currentTerm) != nil ||
+	if decoder.Decode(&currentTerm) != nil ||
 		decoder.Decode(&voteFor) != nil || decoder.Decode(&log) != nil {
 		DPrintf("read persist fail...peerId:%d", rf.me)
 	} else {
-		rf.role = role
 		rf.currentTerm = currentTerm
 		rf.voteFor = voteFor
 		rf.log = log
-		DPrintf("read persist success...peerId:%d,term:%d,voteFor:%d,role:%d,log.length:%d", rf.me, currentTerm, voteFor, role, len(log))
+		DPrintf("read persist success...peerId:%d,term:%d,voteFor:%d,log.length:%d", rf.me, currentTerm, voteFor, len(log))
 	}
 }
 
@@ -245,7 +242,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//rf.voteFor = -1
 		rf.switchFollower(args.Term)
 		rf.voteFor = args.CandidateId
-
+		rf.persist()
 		reply.VoteGrant = true
 		reply.Term = args.Term
 		return
@@ -307,6 +304,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//rf.currentTerm = args.Term
 		//rf.resetElectionTimeout()
 		rf.switchFollower(args.Term)
+		rf.persist()
 	}
 	DPrintf("turn to follower...peerId:%d", rf.me)
 	//日志校验
@@ -333,6 +331,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	for _, entry := range args.Entries {
 		if idx < len(rf.log) {
 			if rf.log[idx].Term != entry.Term {
+				DPrintf("log conflict,delete log...peerId:%d,delete start:%d", rf.me, idx)
 				rf.log = rf.log[0:idx]
 				rf.log = append(rf.log, entry)
 			}
@@ -341,14 +340,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		idx++
 	}
-	//lab2c
 	rf.persist()
 	//更新commitIndex，这里需要判断下是不是来源于一个旧的请求
 	if args.LeaderCommit > rf.commitIndex {
 		for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
 			rf.applyCh <- applyMsg
-			DPrintf("log commit...peerId:%d,index:%d", rf.me, i)
+			DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
 		}
 		rf.commitIndex = args.LeaderCommit
 	}
@@ -497,6 +495,7 @@ func (rf *Raft) broadcastEntry() {
 					if reply.Term > rf.currentTerm {
 						//变为follow，重新选举
 						rf.switchFollower(reply.Term)
+						rf.persist()
 					} else {
 						//nextIndex回退一步
 						//rf.nextIndex[peerId]--
@@ -547,7 +546,7 @@ func (rf *Raft) broadcastEntry() {
 					for i := rf.commitIndex + 1; i <= lastIdx; i++ {
 						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
 						rf.applyCh <- applyMsg
-						DPrintf("log commit...peerId:%d,index:%d", rf.me, i)
+						DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
 					}
 					rf.commitIndex = lastIdx
 				}
@@ -750,8 +749,6 @@ func (rf *Raft) switchFollower(term int) {
 	rf.role = Follower
 	rf.currentTerm = term
 	rf.voteFor = -1
-	//持久化
-	rf.persist()
 	rf.resetElectionTimeout()
 }
 
@@ -796,6 +793,7 @@ func (rf *Raft) receiveVote(vote chan VoteResult) {
 		//被投票的term还要更高，主动降为follow，加速整个投票的过程
 		if maxTerm > rf.currentTerm {
 			rf.switchFollower(maxTerm)
+			rf.persist()
 			return
 		}
 		if cnt > len(rf.peers)/2 {
