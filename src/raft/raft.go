@@ -223,6 +223,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		return
 	}
+	//更新当前任期并更新过期时间，这里需要前置。看figure 2的描述。不然当日志不匹配的时候还是会发起一次新的选举。
+	//通过这种方式来保证所有的server的term能够及时跟上最大的term。
+	//举个栗子，一个故障时间比较长的集群，5个机器的集群，3故障，2存活。存活的两台机器(假设log比较旧)由于一直无法选举出一个leader，
+	//从而导致term一直在增加(假设是50)。然后一台log较新的机器恢复，但是它的term比较旧(假设是1)。这时候旧的两台机器一定是无法获得大多数的选票，
+	//但是新的机器也不能，因为单纯依赖term的自增永远无法跟上旧的机器。请参考TestPersist22C测试用例
+	//All Servers:
+	//• If commitIndex > lastApplied: increment lastApplied, apply
+	//log[lastApplied] to state machine (§5.3)
+	//• If RPC request or response contains term T > currentTerm:
+	//set currentTerm = T, convert to follower (§5.1)
+	if args.Term > rf.currentTerm {
+		rf.switchFollower(args.Term)
+		rf.persist()
+	}
 	//检查日志是否更新
 	//Raft determines which of two logs is more up-to-date
 	//by comparing the index and term of the last entries in the
@@ -236,7 +250,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	//任期更大则以新的任期为准，否则相同任期的情况下先到先得
-	if args.Term > rf.currentTerm || (rf.voteFor == -1 || rf.voteFor == args.CandidateId) {
+	if rf.voteFor == -1 || rf.voteFor == args.CandidateId {
 		//更新任期等信息
 		//rf.currentTerm = args.Term
 		//rf.voteFor = -1
@@ -629,6 +643,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.initNextIndex()
+	rf.switchFollower(0)
 	rf.mu.Unlock()
 	go func() {
 		for !rf.killed() {
@@ -636,7 +651,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 			time.Sleep(10 * time.Millisecond)
 		}
 	}()
-	rf.switchFollower(0)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
