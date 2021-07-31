@@ -708,23 +708,28 @@ func (rf *Raft) leaderElection() {
 		rf.mu.Unlock()
 		return
 	}
+	DPrintf("start election...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
+	rf.role = Candidate
+	rf.currentTerm++
+	//给自己投票并更新心跳超时时钟
+	rf.voteFor = rf.me
+	//持久化
+	rf.persist()
+	rf.resetElectionTimeout()
 	rf.mu.Unlock()
-	func() {
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		DPrintf("start election...server:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
-		rf.role = Candidate
-		rf.currentTerm++
-		//给自己投票并更新心跳超时时钟
-		rf.voteFor = rf.me
-		//持久化
-		rf.persist()
-		rf.resetElectionTimeout()
-		//发送选举给其他服务器
-		rf.requestVote(voteChan)
-	}()
+	//发送选举给其他服务器
+	rf.requestVote(voteChan)
 	//等待rpc请求的地方不能加锁
-	rf.receiveVote(voteChan)
+	//算上自己本身的一票
+	cnt := 1
+	for i := 1; i < len(rf.peers); i++ {
+		DPrintf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
+		res := <-voteChan
+		if rf.handleVoteReply(res, &cnt) {
+			return
+		}
+	}
+	DPrintf("election[finish]...peerId:%d", rf.me)
 }
 
 type VoteResult struct {
@@ -733,11 +738,13 @@ type VoteResult struct {
 }
 
 func (rf *Raft) requestVote(voteChan chan VoteResult) {
+	rf.mu.Lock()
 	DPrintf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
 	lastLogIdx := len(rf.log) - 1
 	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIdx, LastLogTerm: rf.log[lastLogIdx].Term}
+	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -766,59 +773,36 @@ func (rf *Raft) switchFollower(term int) {
 	rf.resetElectionTimeout()
 }
 
-func (rf *Raft) receiveVote(vote chan VoteResult) {
-	//算上自己本身的一票
-	cnt := 1
+//返回true表示可以提前结束流程
+func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) bool {
 	rf.mu.Lock()
-	maxTerm := rf.currentTerm
-	rf.mu.Unlock()
-	for i := 1; i < len(rf.peers); i++ {
-		DPrintf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
-		select {
-		case res := <-vote:
-			func() {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
-				//DPrintf("get vote\n")
-				if res.reply != nil {
-					if res.reply.VoteGrant {
-						cnt++
-					} else if res.reply.Term > maxTerm {
-						maxTerm = res.reply.Term
-					}
-				}
-			}()
-		}
-		//提前结束
-		if cnt > len(rf.peers)/2 {
-			break
-		}
+	defer rf.mu.Unlock()
+	if res.reply == nil {
+		return false
 	}
-	func() {
-		rf.mu.Lock()
-		defer func() {
-			DPrintf("request vote[finish]...serverId:%d,term:%d,vote:%d,maxTerm:%d\n", rf.me, rf.currentTerm, cnt, maxTerm)
-			rf.mu.Unlock()
-		}()
-		//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
-		if rf.role != Candidate {
-			return
-		}
-		//被投票的term还要更高，主动降为follow，加速整个投票的过程
-		if maxTerm > rf.currentTerm {
-			rf.switchFollower(maxTerm)
-			rf.persist()
-			return
-		}
-		if cnt > len(rf.peers)/2 {
-			rf.role = Leader
-			//更新心跳时间，尽快触发发送心跳
-			rf.heartbeatTimeout = time.Now().UnixNano() / 1e6
-			//更新nextIndex
-			rf.initNextIndex()
-			//持久化
-			rf.persist()
-			DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-		}
-	}()
+	if res.reply.Term > rf.currentTerm {
+		rf.switchFollower(res.reply.Term)
+		rf.persist()
+		return true
+	}
+	//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
+	if rf.role != Candidate {
+		return true
+	}
+	if res.reply.VoteGrant {
+		*voteCnt++
+	}
+	//提前结束
+	if *voteCnt > len(rf.peers)/2 {
+		rf.role = Leader
+		//更新心跳时间，尽快触发发送心跳
+		rf.heartbeatTimeout = time.Now().UnixNano() / 1e6
+		//更新nextIndex
+		rf.initNextIndex()
+		//持久化
+		rf.persist()
+		DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
+		return true
+	}
+	return false
 }
