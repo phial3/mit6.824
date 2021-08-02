@@ -318,9 +318,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//rf.currentTerm = args.Term
 		//rf.resetElectionTimeout()
 		rf.switchFollower(args.Term)
+		DPrintf("turn to follower...peerId:%d", rf.me)
 		rf.persist()
 	}
-	DPrintf("turn to follower...peerId:%d", rf.me)
 	//日志校验
 	if args.PrevLogIndex >= 0 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		DPrintf("log not match...peerId:%d\n", rf.me)
@@ -338,6 +338,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		return
 	}
+	rf.resetElectionTimeout()
 	//更新/覆盖本地日志，不能直接删除后面的日志
 	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
 	//and truncating the log would mean “taking back” entries that we may have already told the leader that we have in our log.
