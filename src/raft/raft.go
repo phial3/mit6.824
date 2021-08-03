@@ -85,12 +85,20 @@ type Raft struct {
 	//log
 	log         []LogEntry
 	commitIndex int
+	//index of highest log entry applied to state
+	//machine (initialized to 0, increases
+	//monotonically)
+	//这里lastApplied和commitIndex会一样，但是事实上同步到状态机可以是一个异步的流程，也就是lastApplied<commitIndex。lab2a,2b,2c其实都可以不实现lastApplied
+	lastApplied int
 	//关于nextIndex和matchIndex的说明，这个问题也困扰了我好久，为什么不只保留一个nextIndex/matchIndex。不是必须，但是从理解角度会更直观
 	//https://stackoverflow.com/questions/46376293/what-is-lastapplied-and-matchindex-in-raft-protocol-for-volatile-state-in-server
 	nextIndex  []int
 	matchIndex []int
 	//lab2b测试需要
 	applyCh chan ApplyMsg
+	//commitIndex修改会进行通知，然后同步到状态机。
+	//其实这里用chan也是完全可以实现的，但我们要的是一个通知，实时上是不不需要传递数据的
+	applyCond *sync.Cond
 }
 
 // return currentTerm and whether this server
@@ -183,7 +191,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	DPrintf("snapshot...peerId:%d,index:%d", rf.me, index)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	//rf.log = rf.log[index+1:]
 }
 
 //
@@ -358,12 +369,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.persist()
 	//更新commitIndex，这里需要判断下是不是来源于一个旧的请求
 	if args.LeaderCommit > rf.commitIndex {
-		for i := rf.commitIndex + 1; i <= args.LeaderCommit; i++ {
+		rf.commitIndex = args.LeaderCommit
+		//异步通知写入状态机
+		rf.applyCond.Broadcast()
+		//生产的代码这里其实可以是异步的逻辑
+		/*for i := rf.lastApplied; i <= rf.commitIndex; i++ {
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
 			rf.applyCh <- applyMsg
+			rf.lastApplied = i
 			DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
-		}
-		rf.commitIndex = args.LeaderCommit
+		}*/
 	}
 	reply.Term = rf.currentTerm
 	reply.Success = true
@@ -556,14 +571,17 @@ func (rf *Raft) broadcastEntry() {
 				rf.mu.Lock()
 				//并发的场景，有可能这时候的commit index已经被修改
 				//这里还需要判断term，为什么，是为了解决什么问题？
+				//答案：参考论文的figure 8
 				if lastIdx > rf.commitIndex && currentTerm == rf.log[lastIdx].Term {
+					rf.commitIndex = lastIdx
+					//异步写入状态机
+					rf.applyCond.Broadcast()
 					//通知cfg
-					for i := rf.commitIndex + 1; i <= lastIdx; i++ {
+					/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
 						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
 						rf.applyCh <- applyMsg
 						DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
-					}
-					rf.commitIndex = lastIdx
+					}*/
 				}
 				rf.mu.Unlock()
 				return
@@ -633,6 +651,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.applyCond = sync.NewCond(&rf.mu)
 	rf.mu.Lock()
 	//测试用例
 	rf.applyCh = applyCh
@@ -641,6 +660,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.log = make([]LogEntry, 0, LogInitSize)
 	rf.log = append(rf.log, LogEntry{Term: 0, Command: 0})
 	rf.commitIndex = 0
+	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.initNextIndex()
@@ -654,11 +674,33 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.applyEntry()
 	DPrintf("raft start...server:%d\n", me)
 	return rf
+}
+
+//异步写入
+func (rf *Raft) applyEntry() {
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.commitIndex == rf.lastApplied {
+			rf.applyCond.Wait()
+		}
+		start := rf.lastApplied + 1
+		end := rf.commitIndex
+		rf.mu.Unlock()
+		for i := start; i <= end; i++ {
+			rf.mu.Lock()
+			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+			rf.lastApplied = i
+			rf.mu.Unlock()
+			rf.applyCh <- applyMsg
+			DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 //nextIndex[] for each server, index of the next log entry
