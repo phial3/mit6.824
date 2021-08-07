@@ -99,6 +99,8 @@ type Raft struct {
 	//commitIndex修改会进行通知，然后同步到状态机。
 	//其实这里用chan也是完全可以实现的，但我们要的是一个通知，实时上是不不需要传递数据的
 	applyCond *sync.Cond
+	//lab2D,snapshot
+	lastSnapshotIdx int
 }
 
 // return currentTerm and whether this server
@@ -194,7 +196,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	DPrintf("snapshot...peerId:%d,index:%d", rf.me, index)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//rf.log = rf.log[index+1:]
+	rf.lastSnapshotIdx = index
+	//下标0依然可以作为校验上一条log的校验条件
+	rf.log = rf.log[index:]
 }
 
 //
@@ -256,7 +260,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//end with the same term, then whichever log is longer is
 	//more up-to-date.
 	lastLogIdx := len(rf.log) - 1
-	if args.LastLogTerm < rf.log[lastLogIdx].Term || (args.LastLogTerm == rf.log[lastLogIdx].Term && args.LastLogIndex < lastLogIdx) {
+	if args.LastLogTerm < rf.log[lastLogIdx].Term || (args.LastLogTerm == rf.log[lastLogIdx].Term && args.LastLogIndex < lastLogIdx+rf.lastSnapshotIdx) {
 		DPrintf("candidate log term is older...arg.lastLogTerm:%d,current lastLogTerm:%d,args.LastLogIndex:%d,lastLogIdx:%d", args.LastLogTerm, rf.log[lastLogIdx].Term, args.LastLogIndex, lastLogIdx)
 		return
 	}
@@ -333,7 +337,10 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 	//日志校验
-	if args.PrevLogIndex >= 0 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIdx ||
+		//last log已经移到快照？怎么办
+		args.PrevLogIndex < rf.lastSnapshotIdx ||
+		rf.log[args.PrevLogIndex-rf.lastSnapshotIdx].Term != args.PrevLogTerm {
 		DPrintf("log not match...peerId:%d\n", rf.me)
 		if args.PrevLogIndex >= len(rf.log) {
 			reply.ConflictLogTerm = 0
@@ -484,7 +491,7 @@ func (rf *Raft) broadcastEntry() {
 	}()
 	rf.mu.Lock()
 	//统一在这里生成请求参数，保证每个请求的lastIdx和term在请求过程中不会被修改，起到一个类似快照的作用
-	lastIdx := len(rf.log) - 1
+	lastIdx := len(rf.log) - 1 + rf.lastSnapshotIdx
 	//做一个快照副本
 	currentTerm := rf.currentTerm
 	argArr := make([]AppendEntriesArgs, len(rf.peers))
@@ -572,7 +579,7 @@ func (rf *Raft) broadcastEntry() {
 				//并发的场景，有可能这时候的commit index已经被修改
 				//这里还需要判断term，为什么，是为了解决什么问题？
 				//答案：参考论文的figure 8
-				if lastIdx > rf.commitIndex && currentTerm == rf.log[lastIdx].Term {
+				if lastIdx > rf.commitIndex && currentTerm == rf.log[lastIdx-rf.lastSnapshotIdx].Term {
 					rf.commitIndex = lastIdx
 					//异步写入状态机
 					rf.applyCond.Broadcast()
@@ -665,6 +672,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.initNextIndex()
 	rf.switchFollower(0)
+
+	//lab2D
+	rf.lastSnapshotIdx = 0
 	rf.mu.Unlock()
 	go func() {
 		for !rf.killed() {
@@ -693,7 +703,7 @@ func (rf *Raft) applyEntry() {
 		rf.mu.Unlock()
 		for i := start; i <= end; i++ {
 			rf.mu.Lock()
-			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i-rf.lastSnapshotIdx].Command, CommandIndex: i}
 			rf.lastApplied = i
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
@@ -720,9 +730,9 @@ func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
 	nextIdx := rf.nextIndex[peerId]
 	//下标从1开始的好处来了
 	prevLogIndex := nextIdx - 1
-	prevLogTerm := rf.log[prevLogIndex].Term
+	prevLogTerm := rf.log[prevLogIndex-rf.lastSnapshotIdx].Term
 	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
-		PrevLogTerm: prevLogTerm, Entries: rf.log[nextIdx:], LeaderCommit: rf.commitIndex}
+		PrevLogTerm: prevLogTerm, Entries: rf.log[nextIdx-rf.lastSnapshotIdx:], LeaderCommit: rf.commitIndex}
 	DPrintf("build appendEntry...peerId:%d,leaderId:%d,prevLogIndex:%d,commitIndex:%d\n", peerId, rf.me, prevLogIndex, rf.commitIndex)
 	return arg
 }
@@ -785,8 +795,8 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 	DPrintf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
-	lastLogIdx := len(rf.log) - 1
-	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIdx, LastLogTerm: rf.log[lastLogIdx].Term}
+	lastLogIdx := len(rf.log) - 1 + rf.lastSnapshotIdx
+	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIdx, LastLogTerm: rf.log[lastLogIdx-rf.lastSnapshotIdx].Term}
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
