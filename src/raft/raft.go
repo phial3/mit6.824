@@ -342,14 +342,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		args.PrevLogIndex < rf.lastSnapshotIdx ||
 		rf.log[args.PrevLogIndex-rf.lastSnapshotIdx].Term != args.PrevLogTerm {
 		DPrintf("log not match...peerId:%d\n", rf.me)
-		if args.PrevLogIndex >= len(rf.log) {
-			reply.ConflictLogTerm = 0
-			reply.ConflictLogFirstIdx = len(rf.log) - 1
+		if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIdx {
+			reply.ConflictLogTerm = rf.lastSnapshotIdx
+			reply.ConflictLogFirstIdx = len(rf.log) - 1 + rf.lastSnapshotIdx
 		} else {
-			reply.ConflictLogTerm = rf.log[args.PrevLogIndex].Term
+			reply.ConflictLogTerm = rf.log[args.PrevLogIndex-rf.lastSnapshotIdx].Term
 			//找到该任期的第一个下标
-			idx := args.PrevLogIndex
-			for idx >= 1 && rf.log[idx].Term == reply.ConflictLogTerm {
+			idx := args.PrevLogIndex - rf.lastSnapshotIdx
+			for idx >= 0 && rf.log[idx].Term == reply.ConflictLogTerm {
 				idx--
 			}
 			reply.ConflictLogFirstIdx = idx + 1
@@ -360,7 +360,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//更新/覆盖本地日志，不能直接删除后面的日志
 	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
 	//and truncating the log would mean “taking back” entries that we may have already told the leader that we have in our log.
-	idx := args.PrevLogIndex + 1
+	idx := args.PrevLogIndex - rf.lastSnapshotIdx + 1
 	for _, entry := range args.Entries {
 		if idx < len(rf.log) {
 			if rf.log[idx].Term != entry.Term {
