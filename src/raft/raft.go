@@ -83,7 +83,9 @@ type Raft struct {
 	heartbeatTimeout int64
 
 	//log
-	log         []LogEntry
+	log []LogEntry
+	//lab2d，替换原来的log
+	logType     LogType
 	commitIndex int
 	//index of highest log entry applied to state
 	//machine (initialized to 0, increases
@@ -101,6 +103,43 @@ type Raft struct {
 	applyCond *sync.Cond
 	//lab2D,snapshot
 	lastSnapshotIdx int
+}
+
+//lab2d因为涉及到日志的压缩，压缩后的日志数据的下标会发生改变，抽象一个类型统一在这里进行处理
+type LogType struct {
+	//下标为0依然作为哨兵节点，保存上一次snapshot的term
+	entries []LogEntry
+	//lab2D,snapshot
+	lastSnapshotIdx int
+}
+
+func (l *LogType) index(idx int) LogEntry {
+	if idx < l.lastSnapshotIdx {
+		panic("idx err")
+	}
+	return l.entries[idx-l.lastSnapshotIdx]
+}
+
+func (l *LogType) lastIndex() int {
+	return l.lastSnapshotIdx + len(l.entries) - 1
+}
+
+func (l *LogType) trim(lastIdx int) {
+	if lastIdx <= l.lastSnapshotIdx {
+		panic("idx err")
+	}
+	l.entries = l.entries[0 : lastIdx-l.lastSnapshotIdx]
+}
+
+func (l *LogType) append(log LogEntry) {
+	l.entries = append(l.entries, log)
+}
+
+func (l *LogType) slice(start int) []LogEntry {
+	if start <= l.lastSnapshotIdx {
+		panic("idx err")
+	}
+	return l.entries[start-l.lastSnapshotIdx:]
 }
 
 // return currentTerm and whether this server
@@ -259,9 +298,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	//the log with the later term is more up-to-date. If the logs
 	//end with the same term, then whichever log is longer is
 	//more up-to-date.
-	lastLogIdx := len(rf.log) - 1
-	if args.LastLogTerm < rf.log[lastLogIdx].Term || (args.LastLogTerm == rf.log[lastLogIdx].Term && args.LastLogIndex < lastLogIdx+rf.lastSnapshotIdx) {
-		DPrintf("candidate log term is older...arg.lastLogTerm:%d,current lastLogTerm:%d,args.LastLogIndex:%d,lastLogIdx:%d", args.LastLogTerm, rf.log[lastLogIdx].Term, args.LastLogIndex, lastLogIdx)
+	lastLogIdx := rf.logType.lastIndex()
+	if args.LastLogTerm < rf.logType.index(lastLogIdx).Term || (args.LastLogTerm == rf.logType.index(lastLogIdx).Term && args.LastLogIndex < lastLogIdx) {
+		DPrintf("candidate log term is older...arg.lastLogTerm:%d,current lastLogTerm:%d,args.LastLogIndex:%d,lastLogIdx:%d",
+			args.LastLogTerm, rf.logType.index(lastLogIdx).Term, args.LastLogIndex, lastLogIdx)
 		return
 	}
 	//任期更大则以新的任期为准，否则相同任期的情况下先到先得
@@ -337,19 +377,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 	//日志校验
-	if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIdx ||
+	if args.PrevLogIndex > rf.logType.lastIndex() ||
 		//last log已经移到快照？怎么办
-		args.PrevLogIndex < rf.lastSnapshotIdx ||
-		rf.log[args.PrevLogIndex-rf.lastSnapshotIdx].Term != args.PrevLogTerm {
+		rf.logType.index(args.PrevLogIndex).Term != args.PrevLogTerm {
+		//rf.log[args.PrevLogIndex-rf.lastSnapshotIdx].Term != args.PrevLogTerm {
 		DPrintf("log not match...peerId:%d\n", rf.me)
-		if args.PrevLogIndex >= len(rf.log)+rf.lastSnapshotIdx {
-			reply.ConflictLogTerm = rf.lastSnapshotIdx
-			reply.ConflictLogFirstIdx = len(rf.log) - 1 + rf.lastSnapshotIdx
+		if args.PrevLogIndex > rf.logType.lastIndex() {
+			reply.ConflictLogTerm = 0
+			reply.ConflictLogFirstIdx = rf.logType.lastIndex()
 		} else {
-			reply.ConflictLogTerm = rf.log[args.PrevLogIndex-rf.lastSnapshotIdx].Term
+			reply.ConflictLogTerm = rf.logType.index(args.PrevLogTerm).Term
 			//找到该任期的第一个下标
-			idx := args.PrevLogIndex - rf.lastSnapshotIdx
-			for idx >= 0 && rf.log[idx].Term == reply.ConflictLogTerm {
+			idx := args.PrevLogIndex
+			for idx >= rf.logType.lastSnapshotIdx && rf.logType.index(idx).Term == reply.ConflictLogTerm {
 				idx--
 			}
 			reply.ConflictLogFirstIdx = idx + 1
@@ -360,16 +400,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//更新/覆盖本地日志，不能直接删除后面的日志
 	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
 	//and truncating the log would mean “taking back” entries that we may have already told the leader that we have in our log.
-	idx := args.PrevLogIndex - rf.lastSnapshotIdx + 1
+	idx := args.PrevLogIndex + 1
 	for _, entry := range args.Entries {
-		if idx < len(rf.log) {
-			if rf.log[idx].Term != entry.Term {
+		//覆盖
+		if idx <= rf.logType.lastIndex() {
+			if rf.logType.index(idx).Term != entry.Term {
 				DPrintf("log conflict,delete log...peerId:%d,delete start:%d", rf.me, idx)
-				rf.log = rf.log[0:idx]
-				rf.log = append(rf.log, entry)
+				rf.logType.trim(idx)
+				//rf.log = rf.log[0:idx]
+				//rf.log = append(rf.log, entry)
+				rf.logType.append(entry)
 			}
 		} else {
-			rf.log = append(rf.log, entry)
+			//rf.log = append(rf.log, entry)
+			rf.logType.append(entry)
 		}
 		idx++
 	}
@@ -491,7 +535,7 @@ func (rf *Raft) broadcastEntry() {
 	}()
 	rf.mu.Lock()
 	//统一在这里生成请求参数，保证每个请求的lastIdx和term在请求过程中不会被修改，起到一个类似快照的作用
-	lastIdx := len(rf.log) - 1 + rf.lastSnapshotIdx
+	lastIdx := rf.logType.lastIndex()
 	//做一个快照副本
 	currentTerm := rf.currentTerm
 	argArr := make([]AppendEntriesArgs, len(rf.peers))
@@ -579,7 +623,7 @@ func (rf *Raft) broadcastEntry() {
 				//并发的场景，有可能这时候的commit index已经被修改
 				//这里还需要判断term，为什么，是为了解决什么问题？
 				//答案：参考论文的figure 8
-				if lastIdx > rf.commitIndex && currentTerm == rf.log[lastIdx-rf.lastSnapshotIdx].Term {
+				if lastIdx > rf.commitIndex && currentTerm == rf.logType.index(lastIdx).Term {
 					rf.commitIndex = lastIdx
 					//异步写入状态机
 					rf.applyCond.Broadcast()
@@ -691,7 +735,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	return rf
 }
 
-//异步写入
+//异步写入，为什么要把这个逻辑独立出来
+//时序问题，可以确保提交到state machine的时序性。另外从性能上来讲也会更好
 func (rf *Raft) applyEntry() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -703,7 +748,7 @@ func (rf *Raft) applyEntry() {
 		rf.mu.Unlock()
 		for i := start; i <= end; i++ {
 			rf.mu.Lock()
-			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i-rf.lastSnapshotIdx].Command, CommandIndex: i}
+			applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(i).Command, CommandIndex: i}
 			rf.lastApplied = i
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
@@ -730,9 +775,10 @@ func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
 	nextIdx := rf.nextIndex[peerId]
 	//下标从1开始的好处来了
 	prevLogIndex := nextIdx - 1
-	prevLogTerm := rf.log[prevLogIndex-rf.lastSnapshotIdx].Term
+	//prevLogTerm := rf.log[prevLogIndex-rf.lastSnapshotIdx].Term
+	prevLogTerm := rf.logType.index(prevLogIndex).Term
 	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
-		PrevLogTerm: prevLogTerm, Entries: rf.log[nextIdx-rf.lastSnapshotIdx:], LeaderCommit: rf.commitIndex}
+		PrevLogTerm: prevLogTerm, Entries: rf.logType.slice(nextIdx), LeaderCommit: rf.commitIndex}
 	DPrintf("build appendEntry...peerId:%d,leaderId:%d,prevLogIndex:%d,commitIndex:%d\n", peerId, rf.me, prevLogIndex, rf.commitIndex)
 	return arg
 }
@@ -795,8 +841,8 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 	DPrintf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//包含自己的票数
 	//只需要等待过半的票数，不然一个结点的故障会导致整个投票过程超时
-	lastLogIdx := len(rf.log) - 1 + rf.lastSnapshotIdx
-	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIdx, LastLogTerm: rf.log[lastLogIdx-rf.lastSnapshotIdx].Term}
+	lastLogIdx := rf.logType.lastIndex()
+	args := RequestVoteArgs{Term: rf.currentTerm, CandidateId: rf.me, LastLogIndex: lastLogIdx, LastLogTerm: rf.logType.index(lastLogIdx).Term}
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
