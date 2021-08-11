@@ -83,7 +83,7 @@ type Raft struct {
 	heartbeatTimeout int64
 
 	//log
-	log []LogEntry
+	//log []LogEntry
 	//lab2d，替换原来的log
 	logType     LogType
 	commitIndex int
@@ -103,43 +103,6 @@ type Raft struct {
 	applyCond *sync.Cond
 	//lab2D,snapshot
 	lastSnapshotIdx int
-}
-
-//lab2d因为涉及到日志的压缩，压缩后的日志数据的下标会发生改变，抽象一个类型统一在这里进行处理
-type LogType struct {
-	//下标为0依然作为哨兵节点，保存上一次snapshot的term
-	entries []LogEntry
-	//lab2D,snapshot
-	lastSnapshotIdx int
-}
-
-func (l *LogType) index(idx int) LogEntry {
-	if idx < l.lastSnapshotIdx {
-		panic("idx err")
-	}
-	return l.entries[idx-l.lastSnapshotIdx]
-}
-
-func (l *LogType) lastIndex() int {
-	return l.lastSnapshotIdx + len(l.entries) - 1
-}
-
-func (l *LogType) trim(lastIdx int) {
-	if lastIdx <= l.lastSnapshotIdx {
-		panic("idx err")
-	}
-	l.entries = l.entries[0 : lastIdx-l.lastSnapshotIdx]
-}
-
-func (l *LogType) append(log LogEntry) {
-	l.entries = append(l.entries, log)
-}
-
-func (l *LogType) slice(start int) []LogEntry {
-	if start <= l.lastSnapshotIdx {
-		panic("idx err")
-	}
-	return l.entries[start-l.lastSnapshotIdx:]
 }
 
 // return currentTerm and whether this server
@@ -170,10 +133,10 @@ func (rf *Raft) persist() {
 	encoder := labgob.NewEncoder(w)
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.voteFor)
-	encoder.Encode(rf.log)
+	encoder.Encode(rf.logType)
 
 	data := w.Bytes()
-	DPrintf("persist...peerId:%d,log.length:%d", rf.me, len(rf.log))
+	DPrintf("persist...peerId:%d,lastLogIdx:%d", rf.me, rf.logType.lastIndex())
 	rf.persister.SaveRaftState(data)
 }
 
@@ -203,15 +166,15 @@ func (rf *Raft) readPersist(data []byte) {
 	decoder := labgob.NewDecoder(r)
 	var currentTerm int
 	var voteFor int
-	var log []LogEntry
+	var logType LogType
 	if decoder.Decode(&currentTerm) != nil ||
-		decoder.Decode(&voteFor) != nil || decoder.Decode(&log) != nil {
+		decoder.Decode(&voteFor) != nil || decoder.Decode(&logType) != nil {
 		DPrintf("read persist fail...peerId:%d", rf.me)
 	} else {
 		rf.currentTerm = currentTerm
 		rf.voteFor = voteFor
-		rf.log = log
-		DPrintf("read persist success...peerId:%d,term:%d,voteFor:%d,log.length:%d", rf.me, currentTerm, voteFor, len(log))
+		rf.logType = logType
+		DPrintf("read persist success...peerId:%d,term:%d,voteFor:%d,lastLogIdx:%d", rf.me, currentTerm, voteFor, rf.logType.lastIndex())
 	}
 }
 
@@ -235,9 +198,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	DPrintf("snapshot...peerId:%d,index:%d", rf.me, index)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	rf.lastSnapshotIdx = index
 	//下标0依然可以作为校验上一条log的校验条件
-	rf.log = rf.log[index:]
+	rf.logType.trimFirst(index)
+	rf.logType.LastSnapshotIdx = index
 }
 
 //
@@ -355,7 +318,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	defer func() {
-		DPrintf("append entry receive[finish]...peerId:%d,success:%t,logLen:%d,commitIdx:%d\n", rf.me, reply.Success, len(rf.log), rf.commitIndex)
+		DPrintf("append entry receive[finish]...peerId:%d,success:%t,lastIdx:%d,commitIdx:%d\n", rf.me, reply.Success, rf.logType.lastIndex(), rf.commitIndex)
 		rf.mu.Unlock()
 	}()
 	if args.Term < rf.currentTerm {
@@ -389,7 +352,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.ConflictLogTerm = rf.logType.index(args.PrevLogTerm).Term
 			//找到该任期的第一个下标
 			idx := args.PrevLogIndex
-			for idx >= rf.logType.lastSnapshotIdx && rf.logType.index(idx).Term == reply.ConflictLogTerm {
+			for idx >= rf.logType.LastSnapshotIdx && rf.logType.index(idx).Term == reply.ConflictLogTerm {
 				idx--
 			}
 			reply.ConflictLogFirstIdx = idx + 1
@@ -406,7 +369,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if idx <= rf.logType.lastIndex() {
 			if rf.logType.index(idx).Term != entry.Term {
 				DPrintf("log conflict,delete log...peerId:%d,delete start:%d", rf.me, idx)
-				rf.logType.trim(idx)
+				rf.logType.trimLast(idx)
 				//rf.log = rf.log[0:idx]
 				//rf.log = append(rf.log, entry)
 				rf.logType.append(entry)
@@ -500,7 +463,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	success := false
 	defer func() {
 		rf.mu.Lock()
-		DPrintf("request[finish]...peerId:%d,logLen:%d,commitIdx:%d,success:%t\n", rf.me, len(rf.log), rf.commitIndex, success)
+		DPrintf("request[finish]...peerId:%d,lastLogIdx:%d,commitIdx:%d,success:%t\n", rf.me, rf.logType.lastIndex(), rf.commitIndex, success)
 		rf.mu.Unlock()
 	}()
 	// Your code here (2B).
@@ -511,12 +474,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 	//先写入本地
 	entry := LogEntry{Term: rf.currentTerm, Command: command}
-	rf.log = append(rf.log, entry)
-	logLen := len(rf.log)
+	rf.logType.append(entry)
 	//lab2C
 	rf.persist()
 	//更新logIdx和logTem
-	logIdx = logLen - 1
+	logIdx = rf.logType.lastIndex()
 	logTerm = rf.currentTerm
 	success = true
 	rf.mu.Unlock()
@@ -530,7 +492,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) broadcastEntry() {
 	defer func() {
 		rf.mu.Lock()
-		DPrintf("broadcastEntry[finish]...peerId:%d,logLen:%d,commitIndex:%d", rf.me, len(rf.log), rf.commitIndex)
+		DPrintf("broadcastEntry[finish]...peerId:%d,lastLogIdx:%d,commitIndex:%d", rf.me, rf.logType.lastIndex(), rf.commitIndex)
 		rf.mu.Unlock()
 	}()
 	rf.mu.Lock()
@@ -595,7 +557,7 @@ func (rf *Raft) broadcastEntry() {
 							rf.nextIndex[peerId] = reply.ConflictLogFirstIdx
 						} else {
 							idx := args.PrevLogIndex
-							for idx >= reply.ConflictLogFirstIdx && rf.log[idx].Term != reply.ConflictLogTerm {
+							for idx >= reply.ConflictLogFirstIdx && rf.logType.index(idx).Term != reply.ConflictLogTerm {
 								idx--
 							}
 							rf.nextIndex[peerId] = idx + 1
@@ -707,9 +669,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//测试用例
 	rf.applyCh = applyCh
 
-	//lab2B，这里有个关键点，log的序号是从1开始的，所以这里要填一个0来补
-	rf.log = make([]LogEntry, 0, LogInitSize)
-	rf.log = append(rf.log, LogEntry{Term: 0, Command: 0})
+	//log初始化
+	rf.logType.init()
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -767,7 +728,7 @@ func (rf *Raft) applyEntry() {
 func (rf *Raft) initNextIndex() {
 	for i := 0; i < len(rf.peers); i++ {
 		rf.matchIndex[i] = 0
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = rf.logType.lastIndex() + 1
 	}
 }
 
