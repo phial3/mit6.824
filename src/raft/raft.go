@@ -101,8 +101,6 @@ type Raft struct {
 	//commitIndex修改会进行通知，然后同步到状态机。
 	//其实这里用chan也是完全可以实现的，但我们要的是一个通知，实时上是不不需要传递数据的
 	applyCond *sync.Cond
-	//lab2D,snapshot
-	lastSnapshotIdx int
 }
 
 // return currentTerm and whether this server
@@ -340,23 +338,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.persist()
 	}
 	//日志校验
-	if args.PrevLogIndex > rf.logType.lastIndex() ||
-		//last log已经移到快照？怎么办
-		rf.logType.index(args.PrevLogIndex).Term != args.PrevLogTerm {
-		//rf.log[args.PrevLogIndex-rf.lastSnapshotIdx].Term != args.PrevLogTerm {
+	if args.PrevLogIndex > rf.logType.lastIndex() {
 		DPrintf("log not match...peerId:%d\n", rf.me)
-		if args.PrevLogIndex > rf.logType.lastIndex() {
-			reply.ConflictLogTerm = 0
-			reply.ConflictLogFirstIdx = rf.logType.lastIndex()
-		} else {
-			reply.ConflictLogTerm = rf.logType.index(args.PrevLogTerm).Term
-			//找到该任期的第一个下标
-			idx := args.PrevLogIndex
-			for idx >= rf.logType.LastSnapshotIdx && rf.logType.index(idx).Term == reply.ConflictLogTerm {
-				idx--
-			}
-			reply.ConflictLogFirstIdx = idx + 1
+		reply.ConflictLogTerm = 0
+		reply.ConflictLogFirstIdx = rf.logType.lastIndex()
+		return
+	}
+	//PrevLogIndex对应下标的log
+	preLog := rf.logType.index(args.PrevLogIndex)
+	if preLog.Term != args.PrevLogTerm {
+		//找到该任期的第一个下标
+		idx := args.PrevLogIndex
+		for idx > rf.logType.LastSnapshotIdx && rf.logType.index(idx).Term == preLog.Term {
+			idx--
 		}
+		reply.ConflictLogTerm = preLog.Term
+		reply.ConflictLogFirstIdx = idx + 1
+		DPrintf("log not match...peerId:%d,reply:%v\n", rf.me, reply)
 		return
 	}
 	rf.resetElectionTimeout()
@@ -678,8 +676,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.initNextIndex()
 	rf.switchFollower(0)
 
-	//lab2D
-	rf.lastSnapshotIdx = 0
 	rf.mu.Unlock()
 	go func() {
 		for !rf.killed() {

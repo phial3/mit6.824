@@ -12,6 +12,7 @@ func (l *LogType) init() {
 	//lab2B，这里有个关键点，log的序号是从1开始的，所以这里要填一个0来补
 	l.Entries = make([]LogEntry, 0, LogInitSize)
 	l.Entries = append(l.Entries, LogEntry{Term: 0, Command: 0})
+	l.LastSnapshotIdx = 0
 }
 
 func (l *LogType) index(idx int) LogEntry {
