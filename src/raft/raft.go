@@ -126,16 +126,18 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	state := rf.encodeState()
+	DPrintf("persist...peerId:%d,lastLogIdx:%d", rf.me, rf.logType.lastIndex())
+	rf.persister.SaveRaftState(state)
+}
 
+func (rf *Raft) encodeState() []byte {
 	w := new(bytes.Buffer)
 	encoder := labgob.NewEncoder(w)
 	encoder.Encode(rf.currentTerm)
 	encoder.Encode(rf.voteFor)
 	encoder.Encode(rf.logType)
-
-	data := w.Bytes()
-	DPrintf("persist...peerId:%d,lastLogIdx:%d", rf.me, rf.logType.lastIndex())
-	rf.persister.SaveRaftState(data)
+	return w.Bytes()
 }
 
 //
@@ -181,9 +183,11 @@ func (rf *Raft) readPersist(data []byte) {
 // have more recent info since it communicate the snapshot on applyCh.
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
 	// Your code here (2D).
-
+	rf.logType.trimFirst(lastIncludedIndex)
+	rf.logType.LastSnapshotIdx = lastIncludedIndex
+	state := rf.encodeState()
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
 	return true
 }
 
@@ -199,6 +203,41 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	//下标0依然可以作为校验上一条log的校验条件
 	rf.logType.trimFirst(index)
 	rf.logType.LastSnapshotIdx = index
+	state := rf.encodeState()
+	rf.persister.SaveStateAndSnapshot(state, snapshot)
+}
+
+type InstallSnapshotArgs struct {
+	Term              int
+	LeaderID          int
+	LastIncludedIndex int
+	LastIncludedTerm  int
+	Data              []byte
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	DPrintf("install snapshot[start]...peerId:%d,args:%v", rf.me, args)
+	defer func() {
+		DPrintf("install snapshot[finish]...peerId:%d,reply:%v", rf.me, reply)
+	}()
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		rf.mu.Unlock()
+		return
+	}
+	//这里有两个关键点
+	//1.这里不能粗暴的直接把快照进行安装，必须交给state machine统一进行处理，主要是为了解决时序性的问题。
+	//2.state和snapshot必须同时修改
+	applyMsg := ApplyMsg{CommandValid: false, Command: nil,
+		CommandIndex: 0, SnapshotValid: true,
+		Snapshot: args.Data, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
+	rf.mu.Unlock()
+	rf.applyCh <- applyMsg
 }
 
 //
@@ -528,8 +567,13 @@ func (rf *Raft) broadcastEntry() {
 			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
 				if reply.Success {
 					rf.mu.Lock()
-					rf.matchIndex[peerId] = args.PrevLogIndex + len(args.Entries)
-					rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
+					//为了避免旧的请求延时到达，这里需要增加一个条件判断。
+					//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
+					matchIdx := args.PrevLogIndex + len(args.Entries)
+					if rf.matchIndex[peerId] < matchIdx {
+						rf.matchIndex[peerId] = matchIdx
+						rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
+					}
 					rf.mu.Unlock()
 				} else {
 					rf.mu.Lock()

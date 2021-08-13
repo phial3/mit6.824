@@ -1,5 +1,7 @@
 package raft
 
+import "fmt"
+
 //lab2d因为涉及到日志的压缩，压缩后的日志数据的下标会发生改变，抽象一个类型统一在这里进行处理
 type LogType struct {
 	//下标为0依然作为哨兵节点，保存上一次snapshot的term
@@ -17,7 +19,7 @@ func (l *LogType) init() {
 
 func (l *LogType) index(idx int) LogEntry {
 	if idx < l.LastSnapshotIdx {
-		panic("idx err")
+		panic(fmt.Sprintf("idx err...idx:%d,snapshotIdx:%d", idx, l.LastSnapshotIdx))
 	}
 	return l.Entries[idx-l.LastSnapshotIdx]
 }
@@ -28,14 +30,14 @@ func (l *LogType) lastIndex() int {
 
 func (l *LogType) trimLast(lastIdx int) {
 	if lastIdx <= l.LastSnapshotIdx {
-		panic("idx err")
+		panic(fmt.Sprintf("idx err...idx:%d,snapshotIdx:%d", lastIdx, l.LastSnapshotIdx))
 	}
 	l.Entries = l.Entries[0 : lastIdx-l.LastSnapshotIdx]
 }
 
 func (l *LogType) trimFirst(startIdx int) {
 	if startIdx < l.LastSnapshotIdx {
-		panic("idx err")
+		panic(fmt.Sprintf("idx err...idx:%d,snapshotIdx:%d", startIdx, l.LastSnapshotIdx))
 	}
 	l.Entries = l.Entries[startIdx-l.LastSnapshotIdx:]
 }
@@ -46,7 +48,7 @@ func (l *LogType) append(log LogEntry) {
 
 func (l *LogType) slice(start int) []LogEntry {
 	if start <= l.LastSnapshotIdx {
-		panic("idx err")
+		panic(fmt.Sprintf("idx err...idx:%d,snapshotIdx:%d", start, l.LastSnapshotIdx))
 	}
 	return l.Entries[start-l.LastSnapshotIdx:]
 }
