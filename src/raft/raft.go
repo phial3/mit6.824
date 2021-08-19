@@ -197,9 +197,12 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	DPrintf("snapshot...peerId:%d,index:%d", rf.me, index)
+	DPrintf("snapshot[start]...peerId:%d,index:%d", rf.me, index)
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	defer func() {
+		DPrintf("snapshot[finish]...peerId:%d,index:%d", rf.me, index)
+		rf.mu.Unlock()
+	}()
 	//下标0依然可以作为校验上一条log的校验条件
 	rf.logType.trimFirst(index)
 	rf.logType.LastSnapshotIdx = index
@@ -384,6 +387,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	//PrevLogIndex对应下标的log
+	//请求有可能延时到达，到达的时候已经生成快照了
+	if rf.logType.LastSnapshotIdx > args.PrevLogIndex {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
 	preLog := rf.logType.index(args.PrevLogIndex)
 	if preLog.Term != args.PrevLogTerm {
 		//找到该任期的第一个下标
@@ -565,49 +574,50 @@ func (rf *Raft) broadcastEntry() {
 			}
 			rf.mu.Unlock()
 			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
-				if reply.Success {
+				//处理返回结果
+				func(reply *AppendEntriesReply) {
 					rf.mu.Lock()
-					//为了避免旧的请求延时到达，这里需要增加一个条件判断。
-					//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
-					matchIdx := args.PrevLogIndex + len(args.Entries)
-					if rf.matchIndex[peerId] < matchIdx {
-						rf.matchIndex[peerId] = matchIdx
-						rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
-					}
-					rf.mu.Unlock()
-				} else {
-					rf.mu.Lock()
-					if reply.Term > rf.currentTerm {
-						//变为follow，重新选举
-						rf.switchFollower(reply.Term)
-						rf.persist()
-					} else {
-						//nextIndex回退一步
-						//rf.nextIndex[peerId]--
-						//5.3 有针对性的优化逻辑
-						//If desired, the protocol can be optimized to reduce the
-						//number of rejected AppendEntries RPCs. For example,
-						//when rejecting an AppendEntries request, the follower
-						//can include the term of the conflicting entry and the first
-						//index it stores for that term. With this information, the
-						//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
-						//be required for each term with conflicting entries, rather
-						//than one RPC per entry. In practice, we doubt this optimization is necessary, since failures happen infrequently
-						//and it is unlikely that there will be many inconsistent entries.
-						idxBefore := rf.nextIndex[peerId]
-						if reply.ConflictLogTerm == 0 {
-							rf.nextIndex[peerId] = reply.ConflictLogFirstIdx
-						} else {
-							idx := args.PrevLogIndex
-							for idx >= reply.ConflictLogFirstIdx && rf.logType.index(idx).Term != reply.ConflictLogTerm {
-								idx--
-							}
-							rf.nextIndex[peerId] = idx + 1
+					defer rf.mu.Unlock()
+					if reply.Success {
+						//为了避免旧的请求延时到达，这里需要增加一个条件判断。
+						//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
+						matchIdx := args.PrevLogIndex + len(args.Entries)
+						if rf.matchIndex[peerId] < matchIdx {
+							rf.matchIndex[peerId] = matchIdx
+							rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
 						}
-						DPrintf("log not match...next index rollback...nextIndex:[%d],before:%d,after:%d", peerId, idxBefore, rf.nextIndex[peerId])
+					} else {
+						if reply.Term > rf.currentTerm {
+							//变为follow，重新选举
+							rf.switchFollower(reply.Term)
+							rf.persist()
+						} else {
+							//nextIndex回退一步
+							//rf.nextIndex[peerId]--
+							//5.3 有针对性的优化逻辑
+							//If desired, the protocol can be optimized to reduce the
+							//number of rejected AppendEntries RPCs. For example,
+							//when rejecting an AppendEntries request, the follower
+							//can include the term of the conflicting entry and the first
+							//index it stores for that term. With this information, the
+							//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
+							//be required for each term with conflicting entries, rather
+							//than one RPC per entry. In practice, we doubt this optimization is necessary, since failures happen infrequently
+							//and it is unlikely that there will be many inconsistent entries.
+							idxBefore := rf.nextIndex[peerId]
+							if reply.ConflictLogTerm == 0 {
+								rf.nextIndex[peerId] = reply.ConflictLogFirstIdx
+							} else {
+								idx := args.PrevLogIndex
+								for idx >= reply.ConflictLogFirstIdx && rf.logType.index(idx).Term != reply.ConflictLogTerm {
+									idx--
+								}
+								rf.nextIndex[peerId] = idx + 1
+							}
+							DPrintf("log not match...next index rollback...nextIndex:[%d],before:%d,after:%d", peerId, idxBefore, rf.nextIndex[peerId])
+						}
 					}
-					rf.mu.Unlock()
-				}
+				}(&reply)
 			}
 		}(i)
 	}
@@ -714,7 +724,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	//log初始化
 	rf.logType.init()
 	rf.commitIndex = 0
-	rf.lastApplied = 0
+	rf.lastApplied = rf.logType.LastSnapshotIdx
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.initNextIndex()
@@ -750,10 +760,10 @@ func (rf *Raft) applyEntry() {
 		for i := start; i <= end; i++ {
 			rf.mu.Lock()
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(i).Command, CommandIndex: i}
+			DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
 			rf.lastApplied = i
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
-			DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
