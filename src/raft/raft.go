@@ -431,7 +431,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = args.LeaderCommit
 		//异步通知写入状态机
-		rf.applyCond.Broadcast()
+		rf.applyCond.Signal()
 		//生产的代码这里其实可以是异步的逻辑
 		/*for i := rf.lastApplied; i <= rf.commitIndex; i++ {
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
@@ -640,7 +640,7 @@ func (rf *Raft) broadcastEntry() {
 				if lastIdx > rf.commitIndex && currentTerm == rf.logType.index(lastIdx).Term {
 					rf.commitIndex = lastIdx
 					//异步写入状态机
-					rf.applyCond.Broadcast()
+					rf.applyCond.Signal()
 					//通知cfg
 					/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
 						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
@@ -765,7 +765,6 @@ func (rf *Raft) applyEntry() {
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 
