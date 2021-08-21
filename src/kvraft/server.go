@@ -7,9 +7,10 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -18,11 +19,18 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+const (
+	PutCommand    = "Put"
+	AppendCommand = "Append"
+)
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Command string
+	Key     string
+	Value   string
 }
 
 type KVServer struct {
@@ -35,15 +43,73 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	//这里相当于论文定义的state machine,更新data必须保证单线程
+	data map[string]string
 }
 
-
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	DPrintf("Get request[start]...peerId:%d,args:%v", kv.me, args)
+	defer func() {
+		DPrintf("Get request[start]...peerId:%d,reply:%v", kv.me, reply)
+	}()
 	// Your code here.
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+		reply.Value = ""
+		return
+	}
+	value, exsit := kv.data[args.Key]
+	if !exsit {
+		reply.Err = ErrNoKey
+		reply.Value = ""
+		return
+	}
+	reply.Err = OK
+	reply.Value = value
+	return
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	DPrintf("PutAppend request[start]...peerId:%d,args:%v", kv.me, args)
+	defer func() {
+		DPrintf("PutAppend request[start]...peerId:%d,reply:%v", kv.me, reply)
+	}()
 	// Your code here.
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	op := Op{args.Op, args.Key, args.Value}
+	_, _, success := kv.rf.Start(op)
+	if !success {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	reply.Err = OK
+	return
+}
+
+//更新状态机数据，需要保证时序，这里只能使用单线程
+func (kv *KVServer) applyEntry() {
+	for !kv.killed() {
+		msg := <-kv.applyCh
+		op := msg.Command.(Op)
+		switch op.Command {
+		case PutCommand:
+			DPrintf("put...key:%s,values:%s", op.Key, op.Value)
+			kv.data[op.Key] = op.Value
+		case AppendCommand:
+			DPrintf("append...key:%s,values:%s", op.Key, op.Value)
+			v, ok := kv.data[op.Key]
+			if !ok {
+				kv.data[op.Key] = op.Value
+			} else {
+				kv.data[op.Key] = v + op.Value
+			}
+		default:
+			panic("unknown command" + op.Command)
+		}
+	}
 }
 
 //
@@ -95,6 +161,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+
+	go kv.applyEntry()
+	//等待选举出一个leader
+	time.Sleep(1000*time.Duration(time.Millisecond))
 	// You may need initialization code here.
 
 	return kv

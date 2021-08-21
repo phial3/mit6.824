@@ -4,10 +4,11 @@ import "6.824/labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	//保存上一次的leader
+	leader int
 }
 
 func nrand() int64 {
@@ -21,6 +22,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.leader = 0
 	return ck
 }
 
@@ -37,8 +39,23 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
+	args := GetArgs{key}
+	reply := GetReply{}
+	ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
+	if ok && reply.Err == OK {
+		return reply.Value
+	}
+	for peerId := range ck.servers {
+		if peerId == ck.leader {
+			continue
+		}
+		ok := ck.servers[peerId].Call("KVServer.Get", &args, &reply)
+		if ok && reply.Err == OK {
+			ck.leader = peerId
+			return reply.Value
+		}
+	}
 	return ""
 }
 
@@ -54,6 +71,22 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{key, value, op}
+	reply := PutAppendReply{}
+	ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
+	if ok && reply.Err == OK {
+		return
+	}
+	for peerId := range ck.servers {
+		if peerId == ck.leader {
+			continue
+		}
+		ok := ck.servers[peerId].Call("KVServer.PutAppend", &args, &reply)
+		if ok && reply.Err == OK {
+			ck.leader = peerId
+			return
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
