@@ -22,6 +22,7 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 const (
 	PutCommand    = "Put"
 	AppendCommand = "Append"
+	GetCommand    = "Get"
 )
 
 type Op struct {
@@ -58,11 +59,22 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Value = ""
 		return
 	}
+	//为了保证线性一致性，这里需要增加一个no-op的操作
+	op := Op{GetCommand, args.Key, ""}
+	logIdx, _, success := kv.rf.Start(op)
+	if !success {
+		reply.Err = ErrWrongLeader
+		return
+	}
 	value, exsit := kv.data[args.Key]
 	if !exsit {
 		reply.Err = ErrNoKey
 		reply.Value = ""
 		return
+	}
+	//等待过半数提交
+	for kv.rf.GetCommitIndex() < logIdx {
+		time.Sleep(10 * time.Millisecond)
 	}
 	reply.Err = OK
 	reply.Value = value
@@ -80,10 +92,14 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	op := Op{args.Op, args.Key, args.Value}
-	_, _, success := kv.rf.Start(op)
+	logIdx, _, success := kv.rf.Start(op)
 	if !success {
 		reply.Err = ErrWrongLeader
 		return
+	}
+	//等待过半数提交
+	for kv.rf.GetCommitIndex() < logIdx {
+		time.Sleep(10 * time.Millisecond)
 	}
 	reply.Err = OK
 	return
@@ -106,6 +122,8 @@ func (kv *KVServer) applyEntry() {
 			} else {
 				kv.data[op.Key] = v + op.Value
 			}
+		case GetCommand:
+			//no-op
 		default:
 			panic("unknown command" + op.Command)
 		}
@@ -161,10 +179,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-
 	go kv.applyEntry()
 	//等待选举出一个leader
-	time.Sleep(1000*time.Duration(time.Millisecond))
+	//time.Sleep(1000*time.Duration(time.Millisecond))
 	// You may need initialization code here.
 
 	return kv

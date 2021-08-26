@@ -103,6 +103,10 @@ type Raft struct {
 	applyCond *sync.Cond
 }
 
+func (rf *Raft) GetCommitIndex() int {
+	return rf.commitIndex
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
