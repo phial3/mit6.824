@@ -51,7 +51,7 @@ type KVServer struct {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	DPrintf("Get request[start]...peerId:%d,args:%v", kv.me, args)
 	defer func() {
-		DPrintf("Get request[start]...peerId:%d,reply:%v", kv.me, reply)
+		DPrintf("Get request[finish]...peerId:%d,reply:%v", kv.me, reply)
 	}()
 	// Your code here.
 	if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -84,7 +84,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	DPrintf("PutAppend request[start]...peerId:%d,args:%v", kv.me, args)
 	defer func() {
-		DPrintf("PutAppend request[start]...peerId:%d,reply:%v", kv.me, reply)
+		DPrintf("PutAppend request[finish]...peerId:%d,reply:%v", kv.me, reply)
 	}()
 	// Your code here.
 	if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -175,7 +175,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-
+	kv.data = make(map[string]string)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
