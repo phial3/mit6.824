@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -66,18 +66,21 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	value, exsit := kv.data[args.Key]
-	if !exsit {
-		reply.Err = ErrNoKey
-		reply.Value = ""
-		return
-	}
 	//等待过半数提交
 	for kv.rf.GetCommitIndex() < logIdx {
 		time.Sleep(10 * time.Millisecond)
 	}
+	kv.mu.Lock()
+	value, exsit := kv.data[args.Key]
+	if !exsit {
+		reply.Err = ErrNoKey
+		reply.Value = ""
+		kv.mu.Unlock()
+		return
+	}
 	reply.Err = OK
 	reply.Value = value
+	kv.mu.Unlock()
 	return
 }
 
@@ -110,6 +113,7 @@ func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		op := msg.Command.(Op)
+		kv.mu.Lock()
 		switch op.Command {
 		case PutCommand:
 			DPrintf("put...key:%s,values:%s", op.Key, op.Value)
@@ -127,6 +131,7 @@ func (kv *KVServer) applyEntry() {
 		default:
 			panic("unknown command" + op.Command)
 		}
+		kv.mu.Unlock()
 	}
 }
 

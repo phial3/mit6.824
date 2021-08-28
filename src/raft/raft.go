@@ -104,6 +104,8 @@ type Raft struct {
 }
 
 func (rf *Raft) GetCommitIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	return rf.commitIndex
 }
 
