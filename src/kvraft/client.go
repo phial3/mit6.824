@@ -53,9 +53,14 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		for peerId := range ck.servers {
 			ok := ck.servers[peerId].Call("KVServer.Get", &args, &reply)
-			if ok && reply.Err == OK {
-				ck.leader = peerId
-				return reply.Value
+			if ok {
+				if reply.Err == OK {
+					ck.leader = peerId
+					return reply.Value
+				} else if reply.Err == ErrNoKey {
+					ck.leader = peerId
+					return ""
+				}
 			}
 		}
 		time.Sleep(100 * time.Millisecond)

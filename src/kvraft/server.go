@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -46,6 +46,8 @@ type KVServer struct {
 	// Your definitions here.
 	//这里相当于论文定义的state machine,更新data必须保证单线程
 	data map[string]string
+	//更新到状态机的最后的log，这里的定义跟raft的lastApply有些许不一样，这里的lastApply是真正写入状态机的下标
+	lastApply int
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -59,7 +61,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		reply.Value = ""
 		return
 	}
-	//为了保证线性一致性，这里需要增加一个no-op的操作
+	//为了保证线性一致性，这里需要增加一个相当于ReadLog的做法
 	op := Op{GetCommand, args.Key, ""}
 	logIdx, _, success := kv.rf.Start(op)
 	if !success {
@@ -67,10 +69,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	//等待过半数提交
-	for kv.rf.GetCommitIndex() < logIdx {
-		time.Sleep(10 * time.Millisecond)
-	}
 	kv.mu.Lock()
+	for kv.lastApply < logIdx {
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		kv.mu.Lock()
+	}
 	value, exsit := kv.data[args.Key]
 	if !exsit {
 		reply.Err = ErrNoKey
@@ -101,9 +105,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	//等待过半数提交
-	for kv.rf.GetCommitIndex() < logIdx {
+	kv.mu.Lock()
+	for kv.lastApply < logIdx {
+		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
+		kv.mu.Lock()
 	}
+	kv.mu.Unlock()
 	reply.Err = OK
 	return
 }
@@ -131,6 +139,7 @@ func (kv *KVServer) applyEntry() {
 		default:
 			panic("unknown command" + op.Command)
 		}
+		kv.lastApply = msg.CommandIndex
 		kv.mu.Unlock()
 	}
 }
@@ -183,6 +192,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.lastApply = 0
 
 	go kv.applyEntry()
 	//等待选举出一个leader
