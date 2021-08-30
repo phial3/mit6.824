@@ -89,9 +89,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	//由于服务端有可能都还没选举出leader，需要等待
 	for {
 		for peerId := range ck.servers {
-			if peerId == ck.leader {
-				continue
-			}
 			ok := ck.servers[peerId].Call("KVServer.PutAppend", &args, &reply)
 			if ok && reply.Err == OK {
 				ck.leader = peerId
