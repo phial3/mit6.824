@@ -7,7 +7,6 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
 const Debug = false
@@ -32,6 +31,10 @@ type Op struct {
 	Command string
 	Key     string
 	Value   string
+	//客户端ID
+	ClientId int
+	//这个唯一ID是每个客户端生成的唯一ID
+	UniqId int64
 }
 
 type KVServer struct {
@@ -48,6 +51,18 @@ type KVServer struct {
 	data map[string]string
 	//更新到状态机的最后的log，这里的定义跟raft的lastApply有些许不一样，这里的lastApply是真正写入状态机的下标
 	lastApply int
+	//等待提交channel，这里其实也有空间压力，正式环境肯定是需要考虑空间释放
+	waitCh map[int]chan raft.ApplyMsg
+}
+
+func (kv *KVServer) getWaitCh(logIdx int) chan raft.ApplyMsg {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, ok := kv.waitCh[logIdx]
+	if !ok {
+		kv.waitCh[logIdx] = make(chan raft.ApplyMsg)
+	}
+	return kv.waitCh[logIdx]
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -62,19 +77,21 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	//为了保证线性一致性，这里需要增加一个相当于ReadLog的做法
-	op := Op{GetCommand, args.Key, ""}
+	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId}
 	logIdx, _, success := kv.rf.Start(op)
 	if !success {
 		reply.Err = ErrWrongLeader
 		return
 	}
 	//等待过半数提交
-	kv.mu.Lock()
-	for kv.lastApply < logIdx {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+	waitCh := kv.getWaitCh(logIdx)
+	msg := <-waitCh
+	command := msg.Command.(Op)
+	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
+		reply.Err = ErrWrongLeader
+		return
 	}
+	kv.mu.Lock()
 	value, exsit := kv.data[args.Key]
 	if !exsit {
 		reply.Err = ErrNoKey
@@ -98,20 +115,21 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	op := Op{args.Op, args.Key, args.Value}
+	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId}
 	logIdx, _, success := kv.rf.Start(op)
 	if !success {
 		reply.Err = ErrWrongLeader
 		return
 	}
 	//等待过半数提交
-	kv.mu.Lock()
-	for kv.lastApply < logIdx {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+	waitCh := kv.getWaitCh(logIdx)
+	msg := <-waitCh
+	command := msg.Command.(Op)
+	//提交日志后了，重新发生选举，然后把当前的log删除
+	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
+		reply.Err = ErrWrongLeader
+		return
 	}
-	kv.mu.Unlock()
 	reply.Err = OK
 	return
 }
@@ -141,6 +159,8 @@ func (kv *KVServer) applyEntry() {
 		}
 		kv.lastApply = msg.CommandIndex
 		kv.mu.Unlock()
+		waitCh := kv.getWaitCh(msg.CommandIndex)
+		waitCh <- msg
 	}
 }
 
@@ -191,6 +211,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.data = make(map[string]string)
 	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.waitCh = make(map[int]chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.lastApply = 0
 
