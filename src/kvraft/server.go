@@ -53,6 +53,8 @@ type KVServer struct {
 	lastApply int
 	//等待提交channel，这里其实也有空间压力，正式环境肯定是需要考虑空间释放
 	waitCh map[int]chan raft.ApplyMsg
+	//幂等保证，为每个客户端唯一一个最后提交的uniqId。这里有个大前提，每个客户端的请求是串行的
+	lastApplyUniqId map[int]int64
 }
 
 func (kv *KVServer) getWaitCh(logIdx int) chan raft.ApplyMsg {
@@ -63,6 +65,16 @@ func (kv *KVServer) getWaitCh(logIdx int) chan raft.ApplyMsg {
 		kv.waitCh[logIdx] = make(chan raft.ApplyMsg)
 	}
 	return kv.waitCh[logIdx]
+}
+
+func (kv *KVServer) getLastApplyUniqId(clientId int) int64 {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	_, ok := kv.lastApplyUniqId[clientId]
+	if !ok {
+		kv.lastApplyUniqId[clientId] = -1
+	}
+	return kv.lastApplyUniqId[clientId]
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -139,24 +151,32 @@ func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		op := msg.Command.(Op)
-		kv.mu.Lock()
-		switch op.Command {
-		case PutCommand:
-			DPrintf("put...key:%s,values:%s", op.Key, op.Value)
-			kv.data[op.Key] = op.Value
-		case AppendCommand:
-			DPrintf("append...key:%s,values:%s", op.Key, op.Value)
-			v, ok := kv.data[op.Key]
-			if !ok {
+		//针对客户端请求的幂等处理
+		lastId := kv.getLastApplyUniqId(op.ClientId)
+		if op.UniqId > lastId {
+			kv.mu.Lock()
+			switch op.Command {
+			case PutCommand:
+				DPrintf("put...key:%s,values:%s", op.Key, op.Value)
 				kv.data[op.Key] = op.Value
-			} else {
-				kv.data[op.Key] = v + op.Value
+			case AppendCommand:
+				DPrintf("append...key:%s,values:%s", op.Key, op.Value)
+				v, ok := kv.data[op.Key]
+				if !ok {
+					kv.data[op.Key] = op.Value
+				} else {
+					kv.data[op.Key] = v + op.Value
+				}
+			case GetCommand:
+				//no-op
+			default:
+				panic("unknown command" + op.Command)
 			}
-		case GetCommand:
-			//no-op
-		default:
-			panic("unknown command" + op.Command)
+			kv.lastApply = msg.CommandIndex
+			kv.lastApplyUniqId[op.ClientId] = op.UniqId
+			kv.mu.Unlock()
 		}
+		kv.mu.Lock()
 		kv.lastApply = msg.CommandIndex
 		kv.mu.Unlock()
 		waitCh := kv.getWaitCh(msg.CommandIndex)
@@ -214,6 +234,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.waitCh = make(map[int]chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.lastApply = 0
+	kv.lastApplyUniqId = make(map[int]int64)
 
 	go kv.applyEntry()
 	//等待选举出一个leader
