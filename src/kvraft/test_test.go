@@ -467,6 +467,16 @@ func TestUnreliableOneKey3A(t *testing.T) {
 	cfg.end()
 }
 
+func Test(t *testing.T) {
+	ch := make(chan int)
+	go func() {
+		msg := <-ch
+		fmt.Printf("got %d\n", msg)
+	}()
+	ch <- 1
+	ch <- 2
+}
+
 // Submit a request in the minority partition and check that the requests
 // doesn't go through until the partition heals.  The leader in the original
 // network ends up in the minority partition.

@@ -52,19 +52,47 @@ type KVServer struct {
 	//更新到状态机的最后的log，这里的定义跟raft的lastApply有些许不一样，这里的lastApply是真正写入状态机的下标
 	lastApply int
 	//等待提交channel，这里其实也有空间压力，正式环境肯定是需要考虑空间释放
-	waitCh map[int]chan raft.ApplyMsg
+	//You might assume that you will never see Start() return the same index twice,
+	//or at the very least, that if you see the same index again, the command that
+	//first returned that index must have failed. It turns out that neither of these
+	//things are true, even if no servers crash.
+	//简单来说，就是下面的两个假设都是不成立的
+	//1.log相同的index只会出现一次
+	//2.如果相同的index的log出现两次，那么第一个返回的log必然失败
+	waitCh map[int][]chan raft.ApplyMsg
 	//幂等保证，为每个客户端唯一一个最后提交的uniqId。这里有个大前提，每个客户端的请求是串行的
 	lastApplyUniqId map[int]int64
 }
 
-func (kv *KVServer) getWaitCh(logIdx int) chan raft.ApplyMsg {
+func (kv *KVServer) waitCommit(logIdx int) *raft.ApplyMsg {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	_, ok := kv.waitCh[logIdx]
 	if !ok {
-		kv.waitCh[logIdx] = make(chan raft.ApplyMsg)
+		kv.waitCh[logIdx] = make([]chan raft.ApplyMsg, 0, 10)
 	}
-	return kv.waitCh[logIdx]
+	ch := make(chan raft.ApplyMsg)
+	kv.waitCh[logIdx] = append(kv.waitCh[logIdx], ch)
+	kv.mu.Unlock()
+	msg := <-ch
+	return &msg
+}
+
+func (kv *KVServer) notifyCommit(logIdx int, msg *raft.ApplyMsg) {
+	kv.mu.Lock()
+	_, ok := kv.waitCh[logIdx]
+	if !ok {
+		kv.mu.Unlock()
+		return
+	}
+	//通知所有等待的线程
+	for _, ch := range kv.waitCh[logIdx] {
+		kv.mu.Unlock()
+		ch <- *msg
+		kv.mu.Lock()
+	}
+	//清理空间
+	delete(kv.waitCh, logIdx)
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) getLastApplyUniqId(clientId int) int64 {
@@ -96,8 +124,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 	//等待过半数提交
-	waitCh := kv.getWaitCh(logIdx)
-	msg := <-waitCh
+	msg := kv.waitCommit(logIdx)
 	command := msg.Command.(Op)
 	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
 		reply.Err = ErrWrongLeader
@@ -134,8 +161,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	//等待过半数提交
-	waitCh := kv.getWaitCh(logIdx)
-	msg := <-waitCh
+	msg := kv.waitCommit(logIdx)
 	command := msg.Command.(Op)
 	//提交日志后了，重新发生选举，然后把当前的log删除
 	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
@@ -150,6 +176,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
+		DPrintf("log commit...peerId:%d,msg:%v", kv.me, msg)
 		op := msg.Command.(Op)
 		//针对客户端请求的幂等处理
 		lastId := kv.getLastApplyUniqId(op.ClientId)
@@ -157,10 +184,10 @@ func (kv *KVServer) applyEntry() {
 			kv.mu.Lock()
 			switch op.Command {
 			case PutCommand:
-				DPrintf("put...key:%s,values:%s", op.Key, op.Value)
+				DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 				kv.data[op.Key] = op.Value
 			case AppendCommand:
-				DPrintf("append...key:%s,values:%s", op.Key, op.Value)
+				DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 				v, ok := kv.data[op.Key]
 				if !ok {
 					kv.data[op.Key] = op.Value
@@ -179,8 +206,8 @@ func (kv *KVServer) applyEntry() {
 		kv.mu.Lock()
 		kv.lastApply = msg.CommandIndex
 		kv.mu.Unlock()
-		waitCh := kv.getWaitCh(msg.CommandIndex)
-		waitCh <- msg
+		//通知所有等待线程
+		kv.notifyCommit(msg.CommandIndex, &msg)
 	}
 }
 
@@ -230,8 +257,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.data = make(map[string]string)
+	//kv.applyCh = make(chan raft.ApplyMsg, 10)
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.waitCh = make(map[int]chan raft.ApplyMsg)
+	kv.waitCh = make(map[int][]chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.lastApply = 0
 	kv.lastApplyUniqId = make(map[int]int64)
