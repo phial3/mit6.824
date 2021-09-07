@@ -766,7 +766,8 @@ func (rf *Raft) applyEntry() {
 		for i := start; i <= end; i++ {
 			rf.mu.Lock()
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(i).Command, CommandIndex: i}
-			DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
+			DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d", rf.me,
+				applyMsg.CommandIndex, applyMsg.Command, rf.logType.index(i).Term)
 			rf.lastApplied = i
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
@@ -840,7 +841,11 @@ func (rf *Raft) leaderElection() {
 	for i := 1; i < len(rf.peers); i++ {
 		DPrintf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
 		res := <-voteChan
-		if rf.handleVoteReply(res, &cnt) {
+		if finish, leaderChange := rf.handleVoteReply(res, &cnt); finish {
+			if leaderChange {
+				//lab3A,经典的no-op，为了保证重新选举后尽可能快速地提交之前term的日志
+				rf.Start(NoOp{})
+			}
 			return
 		}
 	}
@@ -888,21 +893,24 @@ func (rf *Raft) switchFollower(term int) {
 	rf.resetElectionTimeout()
 }
 
-//返回true表示可以提前结束流程
-func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) bool {
+type NoOp struct {
+}
+
+//(可以提前结束流程,是否成为leader)
+func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) (bool, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if res.reply == nil {
-		return false
+		return false, false
 	}
 	if res.reply.Term > rf.currentTerm {
 		rf.switchFollower(res.reply.Term)
 		rf.persist()
-		return true
+		return true, false
 	}
 	//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
 	if rf.role != Candidate {
-		return true
+		return true, false
 	}
 	if res.reply.VoteGrant {
 		*voteCnt++
@@ -917,7 +925,7 @@ func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) bool {
 		//持久化
 		rf.persist()
 		DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-		return true
+		return true, true
 	}
-	return false
+	return false, false
 }

@@ -104,9 +104,9 @@ func (kv *KVServer) getLastApplyUniqId(clientId int) int64 {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	DPrintf("Get request[start]...peerId:%d,args:%v", kv.me, args)
+	DPrintf("Get request[start]...peerId:%d,args:%+v", kv.me, args)
 	defer func() {
-		DPrintf("Get request[finish]...peerId:%d,reply:%v", kv.me, reply)
+		DPrintf("Get request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
 	// Your code here.
 	if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -148,9 +148,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	DPrintf("PutAppend request[start]...peerId:%d,args:%v", kv.me, args)
+	DPrintf("PutAppend request[start]...peerId:%d,args:%+v", kv.me, args)
 	defer func() {
-		DPrintf("PutAppend request[finish]...peerId:%d,reply:%v", kv.me, reply)
+		DPrintf("PutAppend request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
 	// Your code here.
 	if _, isLeader := kv.rf.GetState(); !isLeader {
@@ -185,8 +185,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		DPrintf("log commit...peerId:%d,msg:%v,logIdx:%d", kv.me, msg, msg.CommandIndex)
-		op := msg.Command.(Op)
+		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
+		op, match := msg.Command.(Op)
+		if !match {
+			continue
+		}
 		//针对客户端请求的幂等处理
 		lastId := kv.getLastApplyUniqId(op.ClientId)
 		kv.mu.Lock()
@@ -257,6 +260,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(raft.NoOp{})
 
 	kv := new(KVServer)
 	kv.me = me
