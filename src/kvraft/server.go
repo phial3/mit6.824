@@ -64,17 +64,14 @@ type KVServer struct {
 	lastApplyUniqId map[int]int64
 }
 
-func (kv *KVServer) waitCommit(logIdx int) *raft.ApplyMsg {
-	kv.mu.Lock()
+func (kv *KVServer) waitCommit(logIdx int) *chan raft.ApplyMsg {
 	_, ok := kv.waitCh[logIdx]
 	if !ok {
 		kv.waitCh[logIdx] = make([]chan raft.ApplyMsg, 0, 10)
 	}
 	ch := make(chan raft.ApplyMsg)
 	kv.waitCh[logIdx] = append(kv.waitCh[logIdx], ch)
-	kv.mu.Unlock()
-	msg := <-ch
-	return &msg
+	return &ch
 }
 
 func (kv *KVServer) notifyCommit(logIdx int, msg *raft.ApplyMsg) {
@@ -84,6 +81,7 @@ func (kv *KVServer) notifyCommit(logIdx int, msg *raft.ApplyMsg) {
 		kv.mu.Unlock()
 		return
 	}
+	//这里可能存在一个时序的问题，有可能在创建wait chan之前就已经commit成功，我们需要把之前
 	//通知所有等待的线程
 	for _, ch := range kv.waitCh[logIdx] {
 		kv.mu.Unlock()
@@ -91,7 +89,7 @@ func (kv *KVServer) notifyCommit(logIdx int, msg *raft.ApplyMsg) {
 		kv.mu.Lock()
 	}
 	//清理空间
-	delete(kv.waitCh, logIdx)
+	//delete(kv.waitCh, logIdx)
 	kv.mu.Unlock()
 }
 
@@ -118,13 +116,18 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	//为了保证线性一致性，这里需要增加一个相当于ReadLog的做法
 	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId}
+	kv.mu.Lock()
 	logIdx, _, success := kv.rf.Start(op)
 	if !success {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	//log.Printf("get wait[start]...peerId:%d,logIdx:%d", kv.me, logIdx)
 	//等待过半数提交
-	msg := kv.waitCommit(logIdx)
+	ch := kv.waitCommit(logIdx)
+	kv.mu.Unlock()
+	msg := <-*ch
+	//log.Printf("get wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
 	command := msg.Command.(Op)
 	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
 		reply.Err = ErrWrongLeader
@@ -155,13 +158,19 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId}
+	//注意，这里一定要加锁，不然可能会导致commit返回比下面的wait chan创建还快的场景
+	kv.mu.Lock()
 	logIdx, _, success := kv.rf.Start(op)
 	if !success {
 		reply.Err = ErrWrongLeader
 		return
 	}
 	//等待过半数提交
-	msg := kv.waitCommit(logIdx)
+	//log.Printf("putAppend wait[start]...peerId:%d,logIdx:%d", kv.me, logIdx)
+	ch := kv.waitCommit(logIdx)
+	kv.mu.Unlock()
+	msg := <-*ch
+	//log.Printf("putAppend wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
 	command := msg.Command.(Op)
 	//提交日志后了，重新发生选举，然后把当前的log删除
 	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
@@ -176,18 +185,18 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		DPrintf("log commit...peerId:%d,msg:%v", kv.me, msg)
+		DPrintf("log commit...peerId:%d,msg:%v,logIdx:%d", kv.me, msg, msg.CommandIndex)
 		op := msg.Command.(Op)
 		//针对客户端请求的幂等处理
 		lastId := kv.getLastApplyUniqId(op.ClientId)
+		kv.mu.Lock()
 		if op.UniqId > lastId {
-			kv.mu.Lock()
 			switch op.Command {
 			case PutCommand:
-				DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
+				//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 				kv.data[op.Key] = op.Value
 			case AppendCommand:
-				DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
+				//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 				v, ok := kv.data[op.Key]
 				if !ok {
 					kv.data[op.Key] = op.Value
@@ -201,9 +210,7 @@ func (kv *KVServer) applyEntry() {
 			}
 			kv.lastApply = msg.CommandIndex
 			kv.lastApplyUniqId[op.ClientId] = op.UniqId
-			kv.mu.Unlock()
 		}
-		kv.mu.Lock()
 		kv.lastApply = msg.CommandIndex
 		kv.mu.Unlock()
 		//通知所有等待线程
@@ -265,8 +272,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.lastApplyUniqId = make(map[int]int64)
 
 	go kv.applyEntry()
-	//等待选举出一个leader
-	//time.Sleep(1000*time.Duration(time.Millisecond))
 	// You may need initialization code here.
 
 	return kv
