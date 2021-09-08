@@ -119,9 +119,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Lock()
 	logIdx, _, success := kv.rf.Start(op)
 	if !success {
+		kv.mu.Unlock()
 		reply.Err = ErrWrongLeader
 		return
 	}
+	DPrintf("append log to raft...peerId:%d,args:%+v,logIdx:%d", kv.me, args, logIdx)
 	//log.Printf("get wait[start]...peerId:%d,logIdx:%d", kv.me, logIdx)
 	//等待过半数提交
 	ch := kv.waitCommit(logIdx)
@@ -162,9 +164,11 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	logIdx, _, success := kv.rf.Start(op)
 	if !success {
+		kv.mu.Unlock()
 		reply.Err = ErrWrongLeader
 		return
 	}
+	DPrintf("append log to raft...peerId:%d,args:%+v,logIdx:%d", kv.me, args, logIdx)
 	//等待过半数提交
 	//log.Printf("putAppend wait[start]...peerId:%d,logIdx:%d", kv.me, logIdx)
 	ch := kv.waitCommit(logIdx)
