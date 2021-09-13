@@ -844,7 +844,8 @@ func (rf *Raft) leaderElection() {
 		if finish, leaderChange := rf.handleVoteReply(res, &cnt); finish {
 			if leaderChange {
 				//lab3A,经典的no-op，为了保证重新选举后尽可能快速地提交之前term的日志
-				rf.Start(NoOp{})
+				logIdx, _, _ := rf.Start(NoOp{})
+				DPrintf("写入no-op操作...peerId:%d,logIdx:%d", rf.me, logIdx)
 			}
 			return
 		}

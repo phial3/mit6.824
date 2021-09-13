@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -130,8 +130,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Unlock()
 	msg := <-*ch
 	//log.Printf("get wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	command := msg.Command.(Op)
-	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
+	command, match := msg.Command.(Op)
+	if !match || command.ClientId != op.ClientId || command.UniqId != op.UniqId {
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -175,9 +175,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Unlock()
 	msg := <-*ch
 	//log.Printf("putAppend wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	command := msg.Command.(Op)
+	command, match := msg.Command.(Op)
 	//提交日志后了，重新发生选举，然后把当前的log删除
-	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
+	if !match || command.ClientId != op.ClientId || command.UniqId != op.UniqId {
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -191,33 +191,34 @@ func (kv *KVServer) applyEntry() {
 		msg := <-kv.applyCh
 		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
 		op, match := msg.Command.(Op)
-		if !match {
-			continue
-		}
-		//针对客户端请求的幂等处理
-		lastId := kv.getLastApplyUniqId(op.ClientId)
-		kv.mu.Lock()
-		if op.UniqId > lastId {
-			switch op.Command {
-			case PutCommand:
-				//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
-				kv.data[op.Key] = op.Value
-			case AppendCommand:
-				//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
-				v, ok := kv.data[op.Key]
-				if !ok {
+		if match {
+			//针对客户端请求的幂等处理
+			lastId := kv.getLastApplyUniqId(op.ClientId)
+			kv.mu.Lock()
+			if op.UniqId > lastId {
+				switch op.Command {
+				case PutCommand:
+					//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 					kv.data[op.Key] = op.Value
-				} else {
-					kv.data[op.Key] = v + op.Value
+				case AppendCommand:
+					//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
+					v, ok := kv.data[op.Key]
+					if !ok {
+						kv.data[op.Key] = op.Value
+					} else {
+						kv.data[op.Key] = v + op.Value
+					}
+				case GetCommand:
+					//no-op
+				default:
+					panic("unknown command" + op.Command)
 				}
-			case GetCommand:
-				//no-op
-			default:
-				panic("unknown command" + op.Command)
+				kv.lastApply = msg.CommandIndex
+				kv.lastApplyUniqId[op.ClientId] = op.UniqId
 			}
-			kv.lastApply = msg.CommandIndex
-			kv.lastApplyUniqId[op.ClientId] = op.UniqId
+			kv.mu.Unlock()
 		}
+		kv.mu.Lock()
 		kv.lastApply = msg.CommandIndex
 		kv.mu.Unlock()
 		//通知所有等待线程
