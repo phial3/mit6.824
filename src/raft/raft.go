@@ -844,8 +844,10 @@ func (rf *Raft) leaderElection() {
 		if finish, leaderChange := rf.handleVoteReply(res, &cnt); finish {
 			if leaderChange {
 				//lab3A,经典的no-op，为了保证重新选举后尽可能快速地提交之前term的日志
-				logIdx, _, _ := rf.Start(NoOp{})
-				DPrintf("写入no-op操作...peerId:%d,logIdx:%d", rf.me, logIdx)
+				//CommandValid=false这里用来通知service层需要执行一个no-op的操作，这样才好比较解耦上下游的逻辑
+				rf.applyCh <- ApplyMsg{}
+				//logIdx, _, _ := rf.Start()
+				DPrintf("写入no-op操作...peerId:%d", rf.me)
 			}
 			return
 		}
@@ -892,9 +894,6 @@ func (rf *Raft) switchFollower(term int) {
 	rf.currentTerm = term
 	rf.voteFor = -1
 	rf.resetElectionTimeout()
-}
-
-type NoOp struct {
 }
 
 //(可以提前结束流程,是否成为leader)

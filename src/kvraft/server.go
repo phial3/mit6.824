@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -22,6 +22,7 @@ const (
 	PutCommand    = "Put"
 	AppendCommand = "Append"
 	GetCommand    = "Get"
+	NOOP          = "NOOP"
 )
 
 type Op struct {
@@ -130,8 +131,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	kv.mu.Unlock()
 	msg := <-*ch
 	//log.Printf("get wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	command, match := msg.Command.(Op)
-	if !match || command.ClientId != op.ClientId || command.UniqId != op.UniqId {
+	command := msg.Command.(Op)
+	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -175,9 +176,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Unlock()
 	msg := <-*ch
 	//log.Printf("putAppend wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	command, match := msg.Command.(Op)
+	command := msg.Command.(Op)
 	//提交日志后了，重新发生选举，然后把当前的log删除
-	if !match || command.ClientId != op.ClientId || command.UniqId != op.UniqId {
+	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
 		reply.Err = ErrWrongLeader
 		return
 	}
@@ -190,8 +191,8 @@ func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
-		op, match := msg.Command.(Op)
-		if match {
+		if msg.CommandValid {
+			op := msg.Command.(Op)
 			//针对客户端请求的幂等处理
 			lastId := kv.getLastApplyUniqId(op.ClientId)
 			kv.mu.Lock()
@@ -208,7 +209,7 @@ func (kv *KVServer) applyEntry() {
 					} else {
 						kv.data[op.Key] = v + op.Value
 					}
-				case GetCommand:
+				case GetCommand, NOOP:
 					//no-op
 				default:
 					panic("unknown command" + op.Command)
@@ -216,13 +217,15 @@ func (kv *KVServer) applyEntry() {
 				kv.lastApply = msg.CommandIndex
 				kv.lastApplyUniqId[op.ClientId] = op.UniqId
 			}
+			kv.lastApply = msg.CommandIndex
 			kv.mu.Unlock()
+			//通知所有等待线程
+			kv.notifyCommit(msg.CommandIndex, &msg)
+		} else {
+			//leader change,发送no-op
+			logIdx, _, _ := kv.rf.Start(Op{NOOP, "", "", 0, 0})
+			DPrintf("写入NOOP...peerId:%d,logIdx:%d", kv.me, logIdx)
 		}
-		kv.mu.Lock()
-		kv.lastApply = msg.CommandIndex
-		kv.mu.Unlock()
-		//通知所有等待线程
-		kv.notifyCommit(msg.CommandIndex, &msg)
 	}
 }
 
@@ -265,7 +268,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
-	labgob.Register(raft.NoOp{})
 
 	kv := new(KVServer)
 	kv.me = me
