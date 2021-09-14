@@ -95,8 +95,8 @@ func (kv *KVServer) notifyCommit(logIdx int, msg *raft.ApplyMsg) {
 }
 
 func (kv *KVServer) getLastApplyUniqId(clientId int) int64 {
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	//kv.mu.Lock()
+	//defer kv.mu.Unlock()
 	_, ok := kv.lastApplyUniqId[clientId]
 	if !ok {
 		kv.lastApplyUniqId[clientId] = -1
@@ -191,17 +191,22 @@ func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
+		kv.mu.Lock()
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			//针对客户端请求的幂等处理
-			lastId := kv.getLastApplyUniqId(op.ClientId)
-			kv.mu.Lock()
-			if op.UniqId > lastId {
-				switch op.Command {
-				case PutCommand:
+			switch op.Command {
+			case PutCommand:
+				//针对客户端请求的幂等处理
+				lastId := kv.getLastApplyUniqId(op.ClientId)
+				if op.UniqId > lastId {
 					//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 					kv.data[op.Key] = op.Value
-				case AppendCommand:
+					kv.lastApplyUniqId[op.ClientId] = op.UniqId
+				}
+			case AppendCommand:
+				//针对客户端请求的幂等处理
+				lastId := kv.getLastApplyUniqId(op.ClientId)
+				if op.UniqId > lastId {
 					//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 					v, ok := kv.data[op.Key]
 					if !ok {
@@ -209,13 +214,12 @@ func (kv *KVServer) applyEntry() {
 					} else {
 						kv.data[op.Key] = v + op.Value
 					}
-				case GetCommand, NOOP:
-					//no-op
-				default:
-					panic("unknown command" + op.Command)
+					kv.lastApplyUniqId[op.ClientId] = op.UniqId
 				}
-				kv.lastApply = msg.CommandIndex
-				kv.lastApplyUniqId[op.ClientId] = op.UniqId
+			case GetCommand, NOOP:
+				//no-op
+			default:
+				panic("unknown command" + op.Command)
 			}
 			kv.lastApply = msg.CommandIndex
 			kv.mu.Unlock()
@@ -225,6 +229,7 @@ func (kv *KVServer) applyEntry() {
 			//leader change,发送no-op
 			logIdx, _, _ := kv.rf.Start(Op{NOOP, "", "", 0, 0})
 			DPrintf("写入NOOP...peerId:%d,logIdx:%d", kv.me, logIdx)
+			kv.mu.Unlock()
 		}
 	}
 }
