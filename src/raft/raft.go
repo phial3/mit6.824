@@ -20,7 +20,6 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -925,7 +924,7 @@ func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) (bool, bool) {
 		rf.initNextIndex()
 		//持久化
 		rf.persist()
-		fmt.Printf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
+		DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
 		return true, true
 	}
 	return false, false
