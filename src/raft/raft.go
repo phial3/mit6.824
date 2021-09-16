@@ -588,7 +588,8 @@ func (rf *Raft) broadcastEntry() {
 						//为了避免旧的请求延时到达，这里需要增加一个条件判断。
 						//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
 						matchIdx := args.PrevLogIndex + len(args.Entries)
-						if rf.matchIndex[peerId] < matchIdx {
+						//term已经发生了改变，这次的结果也需要丢弃，是一个旧的请求
+						if args.Term == rf.currentTerm && rf.matchIndex[peerId] < matchIdx {
 							rf.matchIndex[peerId] = matchIdx
 							rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
 						}
@@ -631,7 +632,6 @@ func (rf *Raft) broadcastEntry() {
 	//• If there exists an N such that N > commitIndex, a majority
 	//of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 	//set commitIndex = N (§5.3, §5.4)
-
 	//复制成功的副本数量
 	replica := 1
 	for i := 1; i < len(rf.peers); i++ {
