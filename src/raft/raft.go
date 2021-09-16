@@ -385,6 +385,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("turn to follower...peerId:%d", rf.me)
 		rf.persist()
 	}
+	rf.resetElectionTimeout()
 	//日志校验
 	if args.PrevLogIndex > rf.logType.lastIndex() {
 		DPrintf("log not match...peerId:%d\n", rf.me)
@@ -411,7 +412,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("log not match...peerId:%d,reply:%v\n", rf.me, reply)
 		return
 	}
-	rf.resetElectionTimeout()
 	//更新/覆盖本地日志，不能直接删除后面的日志
 	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
 	//and truncating the log would mean “taking back” entries that we may have already told the leader that we have in our log.
@@ -635,28 +635,36 @@ func (rf *Raft) broadcastEntry() {
 	//复制成功的副本数量
 	replica := 1
 	for i := 1; i < len(rf.peers); i++ {
-		res := <-appendChan
-		if res.reply != nil && res.reply.Success {
-			replica++
-			if replica > len(rf.peers)/2 {
-				rf.mu.Lock()
-				//并发的场景，有可能这时候的commit index已经被修改
-				//这里还需要判断term，为什么，是为了解决什么问题？
-				//答案：参考论文的figure 8
-				if lastIdx > rf.commitIndex && currentTerm == rf.logType.index(lastIdx).Term {
-					rf.commitIndex = lastIdx
-					//异步写入状态机
-					rf.applyCond.Signal()
-					//通知cfg
-					/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
-						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
-						rf.applyCh <- applyMsg
-						DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
-					}*/
+		select {
+		case res := <-appendChan:
+			if res.reply != nil && res.reply.Success {
+				replica++
+				if replica > len(rf.peers)/2 {
+					rf.mu.Lock()
+					//并发的场景，有可能这时候的commit index已经被修改
+					//这里还需要判断term，为什么，是为了解决什么问题？
+					//答案：参考论文的figure 8
+					if lastIdx > rf.commitIndex && currentTerm == rf.logType.index(lastIdx).Term {
+						rf.commitIndex = lastIdx
+						//异步写入状态机
+						rf.applyCond.Signal()
+						//通知cfg
+						/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
+							applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+							rf.applyCh <- applyMsg
+							DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
+						}*/
+					}
+					rf.mu.Unlock()
+					return
 				}
-				rf.mu.Unlock()
-				return
 			}
+		case <-time.After(500 * time.Millisecond):
+			//增加超时机制，超时退出当前选举
+			rf.mu.Lock()
+			DPrintf("append entry wait timeout,exist...peerId:%d,term:%d", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
+			return
 		}
 	}
 }
@@ -817,6 +825,9 @@ func (rf *Raft) sendHeartbeat() {
 
 func (rf *Raft) leaderElection() {
 	//注意这里不能加全局锁，依赖rpc的地方加锁会导致锁的粒度非常大，性能急剧下降
+	defer func() {
+		DPrintf("election[finish]...peerId:%d", rf.me)
+	}()
 	voteChan := make(chan VoteResult, len(rf.peers))
 	now := time.Now().UnixNano() / 1e6
 	rf.mu.Lock()
@@ -840,19 +851,26 @@ func (rf *Raft) leaderElection() {
 	cnt := 1
 	for i := 1; i < len(rf.peers); i++ {
 		DPrintf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
-		res := <-voteChan
-		if finish, leaderChange := rf.handleVoteReply(res, &cnt); finish {
-			if leaderChange {
-				//lab3A,经典的no-op，为了保证重新选举后尽可能快速地提交之前term的日志
-				//CommandValid=false这里用来通知service层需要执行一个no-op的操作，这样才好比较解耦上下游的逻辑
-				rf.applyCh <- ApplyMsg{}
-				//logIdx, _, _ := rf.Start()
-				DPrintf("写入no-op操作...peerId:%d", rf.me)
+		select {
+		case res := <-voteChan:
+			if finish, leaderChange := rf.handleVoteReply(res, &cnt); finish {
+				if leaderChange {
+					//lab3A,经典的no-op，为了保证重新选举后尽可能快速地提交之前term的日志
+					//CommandValid=false这里用来通知service层需要执行一个no-op的操作，这样才好比较解耦上下游的逻辑
+					rf.applyCh <- ApplyMsg{}
+					//logIdx, _, _ := rf.Start()
+					DPrintf("写入no-op操作...peerId:%d", rf.me)
+				}
+				return
 			}
+		case <-time.After(500 * time.Millisecond):
+			//增加超时机制，超时退出当前选举
+			rf.mu.Lock()
+			DPrintf("election wait timeout,exist...peerId:%d,term:%d", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
 			return
 		}
 	}
-	DPrintf("election[finish]...peerId:%d", rf.me)
 }
 
 type VoteResult struct {
@@ -909,7 +927,8 @@ func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) (bool, bool) {
 		return true, false
 	}
 	//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
-	if rf.role != Candidate {
+	//另外一种情况是有可能这个是一个delay msg，需要判断是否还是当前的term
+	if rf.role != Candidate || res.reply.Term != rf.currentTerm {
 		return true, false
 	}
 	if res.reply.VoteGrant {
