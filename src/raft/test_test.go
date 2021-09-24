@@ -11,10 +11,6 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
-	"log"
-	"net/http"
-	"os"
-	"runtime/pprof"
 	"testing"
 )
 import "fmt"
@@ -841,22 +837,15 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.end()
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain")
-
-	p := pprof.Lookup("goroutine")
-	p.WriteTo(w, 1)
-}
-
 func TestFigure8Unreliable2C(t *testing.T) {
-	go func() {
+	/*go func() {
 		//http.HandleFunc("/", handler)
 		// 启动一个 http server，注意 pprof 相关的 handler 已经自动注册过了
 		if err := http.ListenAndServe(":6060", nil); err != nil {
 			log.Fatal(err)
 		}
 		os.Exit(0)
-	}()
+	}()*/
 	servers := 5
 	cfg := make_config(t, servers, true, false)
 	defer cfg.cleanup()

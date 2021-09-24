@@ -551,7 +551,7 @@ func (rf *Raft) broadcastEntry() {
 	//统一在这里生成请求参数，保证每个请求的lastIdx和term在请求过程中不会被修改，起到一个类似快照的作用
 	lastIdx := rf.logType.lastIndex()
 	//做一个快照副本
-	currentTerm := rf.currentTerm
+	reqTerm := rf.currentTerm
 	argArr := make([]AppendEntriesArgs, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -584,12 +584,15 @@ func (rf *Raft) broadcastEntry() {
 				func(reply *AppendEntriesReply) {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
+					//term已经发生了改变，这次的结果也需要丢弃，是一个旧的请求
+					if args.Term != rf.currentTerm {
+						return
+					}
 					if reply.Success {
 						//为了避免旧的请求延时到达，这里需要增加一个条件判断。
 						//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
 						matchIdx := args.PrevLogIndex + len(args.Entries)
-						//term已经发生了改变，这次的结果也需要丢弃，是一个旧的请求
-						if args.Term == rf.currentTerm && rf.matchIndex[peerId] < matchIdx {
+						if rf.matchIndex[peerId] < matchIdx {
 							rf.matchIndex[peerId] = matchIdx
 							rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
 						}
@@ -637,37 +640,41 @@ func (rf *Raft) broadcastEntry() {
 	for i := 1; i < len(rf.peers); i++ {
 		select {
 		case res := <-appendChan:
-			if res.reply != nil && res.reply.Success {
-				replica++
-				if replica > len(rf.peers)/2 {
-					rf.mu.Lock()
-					//并发的场景，有可能这时候的commit index已经被修改
-					//这里还需要判断term，为什么，是为了解决什么问题？
-					//答案：参考论文的figure 8
-					if lastIdx > rf.commitIndex && currentTerm == rf.logType.index(lastIdx).Term {
-						rf.commitIndex = lastIdx
-						//异步写入状态机
-						rf.applyCond.Signal()
-						//通知cfg
-						/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
-							applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
-							rf.applyCh <- applyMsg
-							DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
-						}*/
-					}
-					rf.mu.Unlock()
-					return
-				}
+			if rf.countReplica(reqTerm, res, &replica, lastIdx) {
+				return
 			}
 		}
-		/*case <-time.After(500 * time.Millisecond):
-			//增加超时机制，超时退出当前选举
-			rf.mu.Lock()
-			DPrintf("append entry wait timeout,exist...peerId:%d,term:%d", rf.me, rf.currentTerm)
-			rf.mu.Unlock()
-			return
-		}*/
 	}
+}
+
+//统计成功复制的副本数量
+func (rf *Raft) countReplica(reqTerm int, res AppendEntryResult, replica *int, lastIdx int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reqTerm != rf.currentTerm {
+		return true
+	}
+	if res.reply != nil && res.reply.Success {
+		*replica++
+		if *replica > len(rf.peers)/2 {
+			//并发的场景，有可能这时候的commit index已经被修改
+			//这里还需要判断term，为什么，是为了解决什么问题？
+			//答案：参考论文的figure 8
+			if lastIdx > rf.commitIndex && rf.currentTerm == rf.logType.index(lastIdx).Term {
+				rf.commitIndex = lastIdx
+				//异步写入状态机
+				rf.applyCond.Signal()
+				//通知cfg
+				/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
+					applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+					rf.applyCh <- applyMsg
+					DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
+				}*/
+			}
+			return true
+		}
+	}
+	return false
 }
 
 //
@@ -829,7 +836,7 @@ func (rf *Raft) leaderElection() {
 	defer func() {
 		DPrintf("election[finish]...peerId:%d", rf.me)
 	}()
-	voteChan := make(chan VoteResult, len(rf.peers))
+	voteChan := make(chan *VoteResult, len(rf.peers))
 	now := time.Now().UnixNano() / 1e6
 	rf.mu.Lock()
 	if rf.role == Leader || now <= rf.electionTimeout {
@@ -846,7 +853,7 @@ func (rf *Raft) leaderElection() {
 	rf.resetElectionTimeout()
 	rf.mu.Unlock()
 	//发送选举给其他服务器
-	rf.requestVote(voteChan)
+	args := rf.requestVote(voteChan)
 	//等待rpc请求的地方不能加锁
 	//算上自己本身的一票
 	cnt := 1
@@ -854,7 +861,7 @@ func (rf *Raft) leaderElection() {
 		DPrintf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
 		select {
 		case res := <-voteChan:
-			if finish, leaderChange := rf.handleVoteReply(res, &cnt); finish {
+			if finish, leaderChange := rf.handleVoteReply(args, res, &cnt); finish {
 				if leaderChange {
 					//lab3A,经典的no-op，为了保证重新选举后尽可能快速地提交之前term的日志
 					//CommandValid=false这里用来通知service层需要执行一个no-op的操作，这样才好比较解耦上下游的逻辑
@@ -864,13 +871,14 @@ func (rf *Raft) leaderElection() {
 				}
 				return
 			}
-		case <-time.After(500 * time.Millisecond):
+		}
+		/*case <-time.After(500 * time.Millisecond):
 			//增加超时机制，超时退出当前选举
 			rf.mu.Lock()
 			DPrintf("election wait timeout,exist...peerId:%d,term:%d", rf.me, rf.currentTerm)
 			rf.mu.Unlock()
 			return
-		}
+		}*/
 	}
 }
 
@@ -879,7 +887,7 @@ type VoteResult struct {
 	reply  *RequestVoteReply
 }
 
-func (rf *Raft) requestVote(voteChan chan VoteResult) {
+func (rf *Raft) requestVote(voteChan chan *VoteResult) *RequestVoteArgs {
 	rf.mu.Lock()
 	DPrintf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//包含自己的票数
@@ -897,12 +905,13 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 			resp := rf.sendRequestVote(i, &args, &reply)
 			DPrintf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, reply.VoteGrant)
 			if resp {
-				voteChan <- VoteResult{peerId: i, reply: &reply}
+				voteChan <- &VoteResult{peerId: i, reply: &reply}
 			} else {
-				voteChan <- VoteResult{peerId: i, reply: nil}
+				voteChan <- &VoteResult{peerId: i, reply: nil}
 			}
 		}(i)
 	}
+	return &args
 }
 
 // 转变成follower的逻辑很多，这里抽出来，避免改动的时候有遗漏
@@ -916,20 +925,20 @@ func (rf *Raft) switchFollower(term int) {
 }
 
 //(可以提前结束流程,是否成为leader)
-func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) (bool, bool) {
+func (rf *Raft) handleVoteReply(args *RequestVoteArgs, res *VoteResult, voteCnt *int) (bool, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if res.reply == nil {
 		return false, false
 	}
+	//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
+	//另外一种情况是有可能这个是一个delay msg，需要判断是否还是当前的term
+	if args.Term != rf.currentTerm || rf.role != Candidate {
+		return true, false
+	}
 	if res.reply.Term > rf.currentTerm {
 		rf.switchFollower(res.reply.Term)
 		rf.persist()
-		return true, false
-	}
-	//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
-	//另外一种情况是有可能这个是一个delay msg，需要判断是否还是当前的term
-	if rf.role != Candidate || res.reply.Term != rf.currentTerm {
 		return true, false
 	}
 	if res.reply.VoteGrant {
