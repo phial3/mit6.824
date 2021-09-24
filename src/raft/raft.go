@@ -103,6 +103,12 @@ type Raft struct {
 	applyCond *sync.Cond
 }
 
+func (rf *Raft) GetCommitIndex() int {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.commitIndex
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -379,11 +385,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("turn to follower...peerId:%d", rf.me)
 		rf.persist()
 	}
+	rf.resetElectionTimeout()
 	//日志校验
 	if args.PrevLogIndex > rf.logType.lastIndex() {
 		DPrintf("log not match...peerId:%d\n", rf.me)
 		reply.ConflictLogTerm = 0
-		reply.ConflictLogFirstIdx = rf.logType.lastIndex()
+		reply.ConflictLogFirstIdx = rf.logType.lastIndex() + 1
 		return
 	}
 	//PrevLogIndex对应下标的log
@@ -405,7 +412,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		DPrintf("log not match...peerId:%d,reply:%v\n", rf.me, reply)
 		return
 	}
-	rf.resetElectionTimeout()
 	//更新/覆盖本地日志，不能直接删除后面的日志
 	//If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it.
 	//and truncating the log would mean “taking back” entries that we may have already told the leader that we have in our log.
@@ -537,15 +543,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //发送[nextIndex,]
 func (rf *Raft) broadcastEntry() {
 	defer func() {
-		rf.mu.Lock()
+		/*rf.mu.Lock()
 		DPrintf("broadcastEntry[finish]...peerId:%d,lastLogIdx:%d,commitIndex:%d", rf.me, rf.logType.lastIndex(), rf.commitIndex)
-		rf.mu.Unlock()
+		rf.mu.Unlock()*/
 	}()
 	rf.mu.Lock()
 	//统一在这里生成请求参数，保证每个请求的lastIdx和term在请求过程中不会被修改，起到一个类似快照的作用
 	lastIdx := rf.logType.lastIndex()
 	//做一个快照副本
-	currentTerm := rf.currentTerm
+	reqTerm := rf.currentTerm
 	argArr := make([]AppendEntriesArgs, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
@@ -578,6 +584,10 @@ func (rf *Raft) broadcastEntry() {
 				func(reply *AppendEntriesReply) {
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
+					//term已经发生了改变，这次的结果也需要丢弃，是一个旧的请求
+					if args.Term != rf.currentTerm {
+						return
+					}
 					if reply.Success {
 						//为了避免旧的请求延时到达，这里需要增加一个条件判断。
 						//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
@@ -625,34 +635,46 @@ func (rf *Raft) broadcastEntry() {
 	//• If there exists an N such that N > commitIndex, a majority
 	//of matchIndex[i] ≥ N, and log[N].term == currentTerm:
 	//set commitIndex = N (§5.3, §5.4)
-
 	//复制成功的副本数量
 	replica := 1
 	for i := 1; i < len(rf.peers); i++ {
-		res := <-appendChan
-		if res.reply != nil && res.reply.Success {
-			replica++
-			if replica > len(rf.peers)/2 {
-				rf.mu.Lock()
-				//并发的场景，有可能这时候的commit index已经被修改
-				//这里还需要判断term，为什么，是为了解决什么问题？
-				//答案：参考论文的figure 8
-				if lastIdx > rf.commitIndex && currentTerm == rf.logType.index(lastIdx).Term {
-					rf.commitIndex = lastIdx
-					//异步写入状态机
-					rf.applyCond.Signal()
-					//通知cfg
-					/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
-						applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
-						rf.applyCh <- applyMsg
-						DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
-					}*/
-				}
-				rf.mu.Unlock()
+		select {
+		case res := <-appendChan:
+			if rf.countReplica(reqTerm, res, &replica, lastIdx) {
 				return
 			}
 		}
 	}
+}
+
+//统计成功复制的副本数量
+func (rf *Raft) countReplica(reqTerm int, res AppendEntryResult, replica *int, lastIdx int) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if reqTerm != rf.currentTerm {
+		return true
+	}
+	if res.reply != nil && res.reply.Success {
+		*replica++
+		if *replica > len(rf.peers)/2 {
+			//并发的场景，有可能这时候的commit index已经被修改
+			//这里还需要判断term，为什么，是为了解决什么问题？
+			//答案：参考论文的figure 8
+			if lastIdx > rf.commitIndex && rf.currentTerm == rf.logType.index(lastIdx).Term {
+				rf.commitIndex = lastIdx
+				//异步写入状态机
+				rf.applyCond.Signal()
+				//通知cfg
+				/*for i := rf.commitIndex + 1; i <= lastIdx; i++ {
+					applyMsg := ApplyMsg{CommandValid: true, Command: rf.log[i].Command, CommandIndex: i}
+					rf.applyCh <- applyMsg
+					DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
+				}*/
+			}
+			return true
+		}
+	}
+	return false
 }
 
 //
@@ -760,7 +782,8 @@ func (rf *Raft) applyEntry() {
 		for i := start; i <= end; i++ {
 			rf.mu.Lock()
 			applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(i).Command, CommandIndex: i}
-			DPrintf("log commit...peerId:%d,index:%d,command:%v", rf.me, applyMsg.CommandIndex, applyMsg.Command)
+			DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d", rf.me,
+				applyMsg.CommandIndex, applyMsg.Command, rf.logType.index(i).Term)
 			rf.lastApplied = i
 			rf.mu.Unlock()
 			rf.applyCh <- applyMsg
@@ -810,7 +833,10 @@ func (rf *Raft) sendHeartbeat() {
 
 func (rf *Raft) leaderElection() {
 	//注意这里不能加全局锁，依赖rpc的地方加锁会导致锁的粒度非常大，性能急剧下降
-	voteChan := make(chan VoteResult, len(rf.peers))
+	defer func() {
+		DPrintf("election[finish]...peerId:%d", rf.me)
+	}()
+	voteChan := make(chan *VoteResult, len(rf.peers))
 	now := time.Now().UnixNano() / 1e6
 	rf.mu.Lock()
 	if rf.role == Leader || now <= rf.electionTimeout {
@@ -827,18 +853,33 @@ func (rf *Raft) leaderElection() {
 	rf.resetElectionTimeout()
 	rf.mu.Unlock()
 	//发送选举给其他服务器
-	rf.requestVote(voteChan)
+	args := rf.requestVote(voteChan)
 	//等待rpc请求的地方不能加锁
 	//算上自己本身的一票
 	cnt := 1
 	for i := 1; i < len(rf.peers); i++ {
 		DPrintf("wait for vote...peerId:%d,i:%d\n", rf.me, i)
-		res := <-voteChan
-		if rf.handleVoteReply(res, &cnt) {
-			return
+		select {
+		case res := <-voteChan:
+			if finish, leaderChange := rf.handleVoteReply(args, res, &cnt); finish {
+				if leaderChange {
+					//lab3A,经典的no-op，为了保证重新选举后尽可能快速地提交之前term的日志
+					//CommandValid=false这里用来通知service层需要执行一个no-op的操作，这样才好比较解耦上下游的逻辑
+					rf.applyCh <- ApplyMsg{}
+					//logIdx, _, _ := rf.Start()
+					DPrintf("写入no-op操作...peerId:%d", rf.me)
+				}
+				return
+			}
 		}
+		/*case <-time.After(500 * time.Millisecond):
+			//增加超时机制，超时退出当前选举
+			rf.mu.Lock()
+			DPrintf("election wait timeout,exist...peerId:%d,term:%d", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
+			return
+		}*/
 	}
-	DPrintf("election[finish]...peerId:%d", rf.me)
 }
 
 type VoteResult struct {
@@ -846,7 +887,7 @@ type VoteResult struct {
 	reply  *RequestVoteReply
 }
 
-func (rf *Raft) requestVote(voteChan chan VoteResult) {
+func (rf *Raft) requestVote(voteChan chan *VoteResult) *RequestVoteArgs {
 	rf.mu.Lock()
 	DPrintf("request vote[start] ...id:%d,role:%d,term:%d\n", rf.me, rf.role, rf.currentTerm)
 	//包含自己的票数
@@ -864,12 +905,13 @@ func (rf *Raft) requestVote(voteChan chan VoteResult) {
 			resp := rf.sendRequestVote(i, &args, &reply)
 			DPrintf("get resp...candidateId:%d,to:%d,resp:%t\n", rf.me, i, reply.VoteGrant)
 			if resp {
-				voteChan <- VoteResult{peerId: i, reply: &reply}
+				voteChan <- &VoteResult{peerId: i, reply: &reply}
 			} else {
-				voteChan <- VoteResult{peerId: i, reply: nil}
+				voteChan <- &VoteResult{peerId: i, reply: nil}
 			}
 		}(i)
 	}
+	return &args
 }
 
 // 转变成follower的逻辑很多，这里抽出来，避免改动的时候有遗漏
@@ -882,21 +924,22 @@ func (rf *Raft) switchFollower(term int) {
 	rf.resetElectionTimeout()
 }
 
-//返回true表示可以提前结束流程
-func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) bool {
+//(可以提前结束流程,是否成为leader)
+func (rf *Raft) handleVoteReply(args *RequestVoteArgs, res *VoteResult, voteCnt *int) (bool, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if res.reply == nil {
-		return false
+		return false, false
+	}
+	//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
+	//另外一种情况是有可能这个是一个delay msg，需要判断是否还是当前的term
+	if args.Term != rf.currentTerm || rf.role != Candidate {
+		return true, false
 	}
 	if res.reply.Term > rf.currentTerm {
 		rf.switchFollower(res.reply.Term)
 		rf.persist()
-		return true
-	}
-	//如果角色发生了变化，则忽略投票结果,有可能收到一个更高任期的心跳
-	if rf.role != Candidate {
-		return true
+		return true, false
 	}
 	if res.reply.VoteGrant {
 		*voteCnt++
@@ -911,7 +954,7 @@ func (rf *Raft) handleVoteReply(res VoteResult, voteCnt *int) bool {
 		//持久化
 		rf.persist()
 		DPrintf("become leader...server:%d,term:%d\n", rf.me, rf.currentTerm)
-		return true
+		return true, true
 	}
-	return false
+	return false, false
 }

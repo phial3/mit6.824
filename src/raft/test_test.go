@@ -18,6 +18,7 @@ import "time"
 import "math/rand"
 import "sync/atomic"
 import "sync"
+import _ "net/http/pprof"
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -837,6 +838,14 @@ func TestUnreliableAgree2C(t *testing.T) {
 }
 
 func TestFigure8Unreliable2C(t *testing.T) {
+	/*go func() {
+		//http.HandleFunc("/", handler)
+		// 启动一个 http server，注意 pprof 相关的 handler 已经自动注册过了
+		if err := http.ListenAndServe(":6060", nil); err != nil {
+			log.Fatal(err)
+		}
+		os.Exit(0)
+	}()*/
 	servers := 5
 	cfg := make_config(t, servers, true, false)
 	defer cfg.cleanup()

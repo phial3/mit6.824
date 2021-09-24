@@ -1,6 +1,8 @@
 package kvraft
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -98,7 +100,9 @@ func check(cfg *config, t *testing.T, ck *Clerk, key string, value string) {
 // a client runs the function f and then signals it is done
 func run_client(t *testing.T, cfg *config, me int, ca chan bool, fn func(me int, ck *Clerk, t *testing.T)) {
 	ok := false
-	defer func() { ca <- ok }()
+	defer func() {
+		ca <- ok
+	}()
 	ck := cfg.makeClient(cfg.All())
 	fn(me, ck, t)
 	ok = true
@@ -112,10 +116,10 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 		ca[cli] = make(chan bool)
 		go run_client(t, cfg, cli, ca[cli], fn)
 	}
-	// log.Printf("spawn_clients_and_wait: waiting for clients")
+	//log.Printf("spawn_clients_and_wait: waiting for clients")
 	for cli := 0; cli < ncli; cli++ {
 		ok := <-ca[cli]
-		// log.Printf("spawn_clients_and_wait: client %d is done\n", cli)
+		//log.Printf("spawn_clients_and_wait: client %d is done\n", cli)
 		if ok == false {
 			t.Fatalf("failure")
 		}
@@ -247,7 +251,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 		clnts[i] = make(chan int)
 	}
 	for i := 0; i < 3; i++ {
-		// log.Printf("Iteration %v\n", i)
+		//log.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
 		go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
@@ -268,7 +272,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 				}
 				nv := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
 				if (rand.Int() % 1000) < 500 {
-					// log.Printf("%d: client new append %v\n", cli, nv)
+					//log.Printf("%d: client new append %v\n", cli, nv)
 					Append(cfg, myck, key, nv, opLog, cli)
 					if !randomkeys {
 						last = NextValue(last, nv)
@@ -280,7 +284,7 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
 				} else {
-					// log.Printf("%d: client new get %v\n", cli, key)
+					//log.Printf("%d: client new get %v\n", cli, key)
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
@@ -465,6 +469,25 @@ func TestUnreliableOneKey3A(t *testing.T) {
 	checkConcurrentAppends(t, vx, counts)
 
 	cfg.end()
+}
+
+func Test(t *testing.T) {
+	mp := make(map[int][]chan int)
+	mp[0] = make([]chan int, 0, 10)
+	for i := 0; i < 2; i++ {
+		go func() {
+			ch := make(chan int)
+			mp[0] = append(mp[0], ch)
+			fmt.Printf("wait\n")
+			msg := <-ch
+			fmt.Printf("get %d\n", msg)
+		}()
+	}
+	time.Sleep(1 * time.Second)
+	for _, ch := range mp[0] {
+		ch <- 1
+	}
+	time.Sleep(1 * time.Second)
 }
 
 // Submit a request in the minority partition and check that the requests
