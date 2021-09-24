@@ -390,7 +390,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex > rf.logType.lastIndex() {
 		DPrintf("log not match...peerId:%d\n", rf.me)
 		reply.ConflictLogTerm = 0
-		reply.ConflictLogFirstIdx = rf.logType.lastIndex()
+		reply.ConflictLogFirstIdx = rf.logType.lastIndex() + 1
 		return
 	}
 	//PrevLogIndex对应下标的log
@@ -543,9 +543,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //发送[nextIndex,]
 func (rf *Raft) broadcastEntry() {
 	defer func() {
-		rf.mu.Lock()
+		/*rf.mu.Lock()
 		DPrintf("broadcastEntry[finish]...peerId:%d,lastLogIdx:%d,commitIndex:%d", rf.me, rf.logType.lastIndex(), rf.commitIndex)
-		rf.mu.Unlock()
+		rf.mu.Unlock()*/
 	}()
 	rf.mu.Lock()
 	//统一在这里生成请求参数，保证每个请求的lastIdx和term在请求过程中不会被修改，起到一个类似快照的作用
@@ -659,13 +659,14 @@ func (rf *Raft) broadcastEntry() {
 					return
 				}
 			}
-		case <-time.After(500 * time.Millisecond):
+		}
+		/*case <-time.After(500 * time.Millisecond):
 			//增加超时机制，超时退出当前选举
 			rf.mu.Lock()
 			DPrintf("append entry wait timeout,exist...peerId:%d,term:%d", rf.me, rf.currentTerm)
 			rf.mu.Unlock()
 			return
-		}
+		}*/
 	}
 }
 
