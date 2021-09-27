@@ -20,6 +20,7 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -197,6 +198,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	}
 	rf.logType.rebuild(lastIncludedTerm, lastIncludedIndex)
 	state := rf.encodeState()
+	rf.commitIndex = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 	return true
 }
@@ -207,10 +210,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	DPrintf("snapshot[start]...peerId:%d,index:%d", rf.me, index)
+	fmt.Printf("snapshot[start]...peerId:%d,index:%d\n", rf.me, index)
 	rf.mu.Lock()
 	defer func() {
-		DPrintf("snapshot[finish]...peerId:%d,index:%d", rf.me, index)
+		fmt.Printf("snapshot[finish]...peerId:%d,index:%d\n", rf.me, index)
 		rf.mu.Unlock()
 	}()
 	//下标0依然可以作为校验上一条log的校验条件
@@ -234,9 +237,9 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	DPrintf("install snapshot[start]...peerId:%d,args:%v", rf.me, args)
+	fmt.Printf("install snapshot[start]...peerId:%d,args:%v\n", rf.me, args)
 	defer func() {
-		DPrintf("install snapshot[finish]...peerId:%d,reply:%v", rf.me, reply)
+		fmt.Printf("install snapshot[finish]...peerId:%d,reply:%v\n", rf.me, reply)
 	}()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
@@ -260,7 +263,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 
 //定时检查是否需要发送snapshot
 func (rf *Raft) InstallSnapshotCheckLoop() {
-	if !rf.killed() {
+	for !rf.killed() {
 		rf.InstallSnapshotCheck()
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -824,21 +827,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) applyEntry() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.commitIndex == rf.lastApplied {
+		for rf.commitIndex == rf.lastApplied {
 			rf.applyCond.Wait()
 		}
-		start := rf.lastApplied + 1
-		end := rf.commitIndex
+		rf.lastApplied++
+		applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(rf.lastApplied).Command, CommandIndex: rf.lastApplied}
+		DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d", rf.me,
+			applyMsg.CommandIndex, applyMsg.Command, rf.logType.index(rf.lastApplied).Term)
 		rf.mu.Unlock()
-		for i := start; i <= end; i++ {
-			rf.mu.Lock()
-			applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(i).Command, CommandIndex: i}
-			DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d", rf.me,
-				applyMsg.CommandIndex, applyMsg.Command, rf.logType.index(i).Term)
-			rf.lastApplied = i
-			rf.mu.Unlock()
-			rf.applyCh <- applyMsg
-		}
+		rf.applyCh <- applyMsg
 	}
 }
 

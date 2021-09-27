@@ -503,8 +503,8 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	//成功commit的副本数量
 	count := 0
 	for time.Since(t0).Seconds() < 10 {
-		// try all the servers, maybe one is the leader.
 		index := -1
+		// try all the servers, maybe one is the leader.
 		for si := 0; si < cfg.n; si++ {
 			starts = (starts + 1) % cfg.n
 			var rf *Raft
