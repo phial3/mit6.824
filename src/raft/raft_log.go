@@ -10,6 +10,10 @@ type LogType struct {
 	LastSnapshotIdx int
 }
 
+func (l *LogType) getLastSnapshotTerm() int {
+	return l.Entries[0].Term
+}
+
 func (l *LogType) init() {
 	//lab2B，这里有个关键点，log的序号是从1开始的，所以这里要填一个0来补
 	l.Entries = make([]LogEntry, 0, LogInitSize)
@@ -51,4 +55,10 @@ func (l *LogType) slice(start int) []LogEntry {
 		panic(fmt.Sprintf("idx err...idx:%d,snapshotIdx:%d", start, l.LastSnapshotIdx))
 	}
 	return l.Entries[start-l.LastSnapshotIdx:]
+}
+
+func (l *LogType) rebuild(lastIncludedTerm int, lastIncludedIndex int) {
+	l.Entries = make([]LogEntry, 0, LogInitSize)
+	l.Entries = append(l.Entries, LogEntry{Term: lastIncludedTerm, Command: 0})
+	l.LastSnapshotIdx = lastIncludedIndex
 }

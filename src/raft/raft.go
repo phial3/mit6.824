@@ -190,9 +190,16 @@ func (rf *Raft) readPersist(data []byte) {
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	// Your code here (2D).
-	rf.logType.trimFirst(lastIncludedIndex)
-	rf.logType.LastSnapshotIdx = lastIncludedIndex
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedIndex <= rf.commitIndex {
+		return false
+	}
+	DPrintf("CondInstallSnapshot...peerId:%d,lastIncludedIndex:%d", rf.me, lastIncludedIndex)
+	rf.logType.rebuild(lastIncludedTerm, lastIncludedIndex)
 	state := rf.encodeState()
+	rf.commitIndex = lastIncludedIndex
+	rf.lastApplied = lastIncludedIndex
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 	return true
 }
@@ -230,13 +237,13 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	DPrintf("install snapshot[start]...peerId:%d,args:%v", rf.me, args)
+	DPrintf("receive install snapshot[start]...peerId:%d,args:%+v", rf.me, args)
 	defer func() {
-		DPrintf("install snapshot[finish]...peerId:%d,reply:%v", rf.me, reply)
+		rf.mu.Unlock()
+		DPrintf("receive install snapshot[finish]...peerId:%d,reply:%+v", rf.me, reply)
 	}()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		rf.mu.Unlock()
 		return
 	}
 	//这里有两个关键点
@@ -247,6 +254,52 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		Snapshot: args.Data, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
 	rf.mu.Unlock()
 	rf.applyCh <- applyMsg
+	rf.mu.Lock()
+}
+
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
+//定时检查是否需要发送snapshot
+func (rf *Raft) InstallSnapshotCheckLoop() {
+	for !rf.killed() {
+		rf.InstallSnapshotCheck()
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+func (rf *Raft) InstallSnapshotCheck() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.role != Leader {
+		return
+	}
+	for i := 0; i < len(rf.peers); i++ {
+		if rf.me == i {
+			continue
+		}
+		if rf.nextIndex[i] <= rf.logType.LastSnapshotIdx {
+			args := InstallSnapshotArgs{rf.currentTerm, rf.me,
+				rf.logType.LastSnapshotIdx,
+				rf.logType.getLastSnapshotTerm(), rf.persister.ReadSnapshot()}
+			reply := InstallSnapshotReply{}
+			rf.mu.Unlock()
+			ok := rf.sendInstallSnapshot(i, &args, &reply)
+			rf.mu.Lock()
+			if ok {
+				if rf.role != Leader || args.Term != rf.currentTerm {
+					return
+				}
+				rf.nextIndex[i] = args.LastIncludedIndex + 1
+				if reply.Term > rf.currentTerm {
+					rf.switchFollower(reply.Term)
+					rf.persist()
+					return
+				}
+			}
+		}
+	}
 }
 
 //
@@ -552,7 +605,7 @@ func (rf *Raft) broadcastEntry() {
 	lastIdx := rf.logType.lastIndex()
 	//做一个快照副本
 	reqTerm := rf.currentTerm
-	argArr := make([]AppendEntriesArgs, len(rf.peers))
+	argArr := make([]*AppendEntriesArgs, len(rf.peers))
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
@@ -567,67 +620,69 @@ func (rf *Raft) broadcastEntry() {
 			continue
 		}
 		go func(peerId int) {
+			rf.mu.Lock()
 			//args := rf.makeAppendEntryArgs(peerId, lastIdx)
 			args := argArr[peerId]
 			reply := AppendEntriesReply{}
 			defer func() {
+				rf.mu.Unlock()
 				appendChan <- AppendEntryResult{peerId: peerId, reply: &reply}
 			}()
-			rf.mu.Lock()
 			if rf.role != Leader {
-				rf.mu.Unlock()
 				return
 			}
 			rf.mu.Unlock()
-			if ok := rf.sendAppendEntries(peerId, &args, &reply); ok {
-				//处理返回结果
-				func(reply *AppendEntriesReply) {
-					rf.mu.Lock()
-					defer rf.mu.Unlock()
-					//term已经发生了改变，这次的结果也需要丢弃，是一个旧的请求
-					if args.Term != rf.currentTerm {
-						return
+			ok := false
+			//next>lastSnapshotIdx的情况下才会发送appendEntry
+			if args != nil {
+				ok = rf.sendAppendEntries(peerId, args, &reply)
+			}
+			rf.mu.Lock()
+			if ok {
+				//term已经发生了改变，这次的结果也需要丢弃，是一个旧的请求
+				if args.Term != rf.currentTerm {
+					return
+				}
+				if reply.Success {
+					//为了避免旧的请求延时到达，这里需要增加一个条件判断。
+					//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
+					matchIdx := args.PrevLogIndex + len(args.Entries)
+					if rf.matchIndex[peerId] < matchIdx {
+						rf.matchIndex[peerId] = matchIdx
+						rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
 					}
-					if reply.Success {
-						//为了避免旧的请求延时到达，这里需要增加一个条件判断。
-						//PS:分布式程序的痛点，不能保证reply按理想的顺序返回
-						matchIdx := args.PrevLogIndex + len(args.Entries)
-						if rf.matchIndex[peerId] < matchIdx {
-							rf.matchIndex[peerId] = matchIdx
-							rf.nextIndex[peerId] = rf.matchIndex[peerId] + 1
-						}
+				} else {
+					if reply.Term > rf.currentTerm {
+						//变为follow，重新选举
+						rf.switchFollower(reply.Term)
+						rf.persist()
 					} else {
-						if reply.Term > rf.currentTerm {
-							//变为follow，重新选举
-							rf.switchFollower(reply.Term)
-							rf.persist()
+						//nextIndex回退一步
+						//rf.nextIndex[peerId]--
+						//5.3 有针对性的优化逻辑
+						//If desired, the protocol can be optimized to reduce the
+						//number of rejected AppendEntries RPCs. For example,
+						//when rejecting an AppendEntries request, the follower
+						//can include the term of the conflicting entry and the first
+						//index it stores for that term. With this information, the
+						//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
+						//be required for each term with conflicting entries, rather
+						//than one RPC per entry. In practice, we doubt this optimization is necessary, since failures happen infrequently
+						//and it is unlikely that there will be many inconsistent entries.
+						idxBefore := rf.nextIndex[peerId]
+						if reply.ConflictLogTerm == 0 {
+							rf.nextIndex[peerId] = reply.ConflictLogFirstIdx
 						} else {
-							//nextIndex回退一步
-							//rf.nextIndex[peerId]--
-							//5.3 有针对性的优化逻辑
-							//If desired, the protocol can be optimized to reduce the
-							//number of rejected AppendEntries RPCs. For example,
-							//when rejecting an AppendEntries request, the follower
-							//can include the term of the conflicting entry and the first
-							//index it stores for that term. With this information, the
-							//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
-							//be required for each term with conflicting entries, rather
-							//than one RPC per entry. In practice, we doubt this optimization is necessary, since failures happen infrequently
-							//and it is unlikely that there will be many inconsistent entries.
-							idxBefore := rf.nextIndex[peerId]
-							if reply.ConflictLogTerm == 0 {
-								rf.nextIndex[peerId] = reply.ConflictLogFirstIdx
-							} else {
-								idx := args.PrevLogIndex
-								for idx >= reply.ConflictLogFirstIdx && rf.logType.index(idx).Term != reply.ConflictLogTerm {
-									idx--
-								}
-								rf.nextIndex[peerId] = idx + 1
+							idx := args.PrevLogIndex
+							for idx >= reply.ConflictLogFirstIdx && idx >= rf.logType.LastSnapshotIdx &&
+								rf.logType.index(idx).Term != reply.ConflictLogTerm {
+								idx--
 							}
-							DPrintf("log not match...next index rollback...nextIndex:[%d],before:%d,after:%d", peerId, idxBefore, rf.nextIndex[peerId])
+							rf.nextIndex[peerId] = idx + 1
 						}
+						DPrintf("log not match...next index rollback...nextIndex:[%d],before:%d,after:%d", peerId, idxBefore, rf.nextIndex[peerId])
 					}
-				}(&reply)
+				}
 			}
 		}(i)
 	}
@@ -745,25 +800,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	//log初始化
 	rf.logType.init()
-	rf.commitIndex = 0
+	rf.switchFollower(0)
+	rf.mu.Unlock()
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+	rf.commitIndex = rf.logType.LastSnapshotIdx
 	rf.lastApplied = rf.logType.LastSnapshotIdx
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.initNextIndex()
-	rf.switchFollower(0)
-
-	rf.mu.Unlock()
-	go func() {
-		for !rf.killed() {
-			rf.sendHeartbeat()
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.sendHeartbeat()
 	go rf.applyEntry()
+	go rf.InstallSnapshotCheckLoop()
 	DPrintf("raft start...server:%d\n", me)
 	return rf
 }
@@ -773,21 +823,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) applyEntry() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		if rf.commitIndex == rf.lastApplied {
+		for rf.commitIndex == rf.lastApplied {
 			rf.applyCond.Wait()
 		}
-		start := rf.lastApplied + 1
-		end := rf.commitIndex
+		rf.lastApplied++
+		applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(rf.lastApplied).Command, CommandIndex: rf.lastApplied}
+		DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d", rf.me,
+			applyMsg.CommandIndex, applyMsg.Command, rf.logType.index(rf.lastApplied).Term)
 		rf.mu.Unlock()
-		for i := start; i <= end; i++ {
-			rf.mu.Lock()
-			applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(i).Command, CommandIndex: i}
-			DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d", rf.me,
-				applyMsg.CommandIndex, applyMsg.Command, rf.logType.index(i).Term)
-			rf.lastApplied = i
-			rf.mu.Unlock()
-			rf.applyCh <- applyMsg
-		}
+		rf.applyCh <- applyMsg
 	}
 }
 
@@ -804,31 +848,40 @@ func (rf *Raft) initNextIndex() {
 	}
 }
 
-func (rf *Raft) makeAppendEntryArgs(peerId int) AppendEntriesArgs {
+func (rf *Raft) makeAppendEntryArgs(peerId int) *AppendEntriesArgs {
 	nextIdx := rf.nextIndex[peerId]
 	//下标从1开始的好处来了
 	prevLogIndex := nextIdx - 1
 	//prevLogTerm := rf.log[prevLogIndex-rf.lastSnapshotIdx].Term
+	if prevLogIndex < rf.logType.LastSnapshotIdx {
+		return nil
+	}
 	prevLogTerm := rf.logType.index(prevLogIndex).Term
 	arg := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: prevLogIndex,
 		PrevLogTerm: prevLogTerm, Entries: rf.logType.slice(nextIdx), LeaderCommit: rf.commitIndex}
 	DPrintf("build appendEntry...peerId:%d,leaderId:%d,prevLogIndex:%d,commitIndex:%d\n", peerId, rf.me, prevLogIndex, rf.commitIndex)
-	return arg
+	return &arg
 }
 
 func (rf *Raft) sendHeartbeat() {
-	rf.mu.Lock()
-	now := time.Now().UnixNano() / 1e6
-	if rf.role != Leader || now < rf.heartbeatTimeout {
-		rf.mu.Unlock()
-		return
+	for !rf.killed() {
+		doSendHeartBeat := func() {
+			rf.mu.Lock()
+			now := time.Now().UnixNano() / 1e6
+			if rf.role != Leader || now < rf.heartbeatTimeout {
+				rf.mu.Unlock()
+				return
+			}
+			//更新下一次发送心跳时间
+			rf.heartbeatTimeout = now + HeartbeatInterval
+			DPrintf("send heartbeat[start]...peerId:%d,term:%d\n", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
+			//这里异步执行效率会更高，不然可能会影响到下一次心跳
+			go rf.broadcastEntry()
+		}
+		doSendHeartBeat()
+		time.Sleep(10 * time.Millisecond)
 	}
-	//更新下一次发送心跳时间
-	rf.heartbeatTimeout = now + HeartbeatInterval
-	DPrintf("send heartbeat[start]...peerId:%d,term:%d\n", rf.me, rf.currentTerm)
-	rf.mu.Unlock()
-	//这里异步执行效率会更高，不然可能会影响到下一次心跳
-	go rf.broadcastEntry()
 }
 
 func (rf *Raft) leaderElection() {
