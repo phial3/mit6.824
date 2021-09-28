@@ -20,7 +20,6 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -193,9 +192,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if lastIncludedIndex < rf.logType.LastSnapshotIdx {
+	if lastIncludedIndex <= rf.commitIndex {
 		return false
 	}
+	DPrintf("CondInstallSnapshot...peerId:%d,lastIncludedIndex:%d", rf.me, lastIncludedIndex)
 	rf.logType.rebuild(lastIncludedTerm, lastIncludedIndex)
 	state := rf.encodeState()
 	rf.commitIndex = lastIncludedIndex
@@ -210,10 +210,10 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	fmt.Printf("snapshot[start]...peerId:%d,index:%d\n", rf.me, index)
+	DPrintf("snapshot[start]...peerId:%d,index:%d", rf.me, index)
 	rf.mu.Lock()
 	defer func() {
-		fmt.Printf("snapshot[finish]...peerId:%d,index:%d\n", rf.me, index)
+		DPrintf("snapshot[finish]...peerId:%d,index:%d", rf.me, index)
 		rf.mu.Unlock()
 	}()
 	//下标0依然可以作为校验上一条log的校验条件
@@ -237,13 +237,13 @@ type InstallSnapshotReply struct {
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	fmt.Printf("install snapshot[start]...peerId:%d,args:%v\n", rf.me, args)
+	DPrintf("receive install snapshot[start]...peerId:%d,args:%+v", rf.me, args)
 	defer func() {
-		fmt.Printf("install snapshot[finish]...peerId:%d,reply:%v\n", rf.me, reply)
+		rf.mu.Unlock()
+		DPrintf("receive install snapshot[finish]...peerId:%d,reply:%+v", rf.me, reply)
 	}()
 	reply.Term = rf.currentTerm
 	if args.Term < rf.currentTerm {
-		rf.mu.Unlock()
 		return
 	}
 	//这里有两个关键点
@@ -254,6 +254,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		Snapshot: args.Data, SnapshotTerm: args.LastIncludedTerm, SnapshotIndex: args.LastIncludedIndex}
 	rf.mu.Unlock()
 	rf.applyCh <- applyMsg
+	rf.mu.Lock()
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -798,24 +799,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	//log初始化
 	rf.logType.init()
-	rf.commitIndex = 0
+	rf.switchFollower(0)
+	rf.mu.Unlock()
+	// initialize from state persisted before a crash
+	rf.readPersist(persister.ReadRaftState())
+	rf.commitIndex = rf.logType.LastSnapshotIdx
 	rf.lastApplied = rf.logType.LastSnapshotIdx
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.initNextIndex()
-	rf.switchFollower(0)
-
-	rf.mu.Unlock()
-	go func() {
-		for !rf.killed() {
-			rf.sendHeartbeat()
-			time.Sleep(10 * time.Millisecond)
-		}
-	}()
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.sendHeartbeat()
 	go rf.applyEntry()
 	go rf.InstallSnapshotCheckLoop()
 	DPrintf("raft start...server:%d\n", me)
@@ -868,18 +863,24 @@ func (rf *Raft) makeAppendEntryArgs(peerId int) *AppendEntriesArgs {
 }
 
 func (rf *Raft) sendHeartbeat() {
-	rf.mu.Lock()
-	now := time.Now().UnixNano() / 1e6
-	if rf.role != Leader || now < rf.heartbeatTimeout {
-		rf.mu.Unlock()
-		return
+	for !rf.killed() {
+		doSendHeartBeat := func() {
+			rf.mu.Lock()
+			now := time.Now().UnixNano() / 1e6
+			if rf.role != Leader || now < rf.heartbeatTimeout {
+				rf.mu.Unlock()
+				return
+			}
+			//更新下一次发送心跳时间
+			rf.heartbeatTimeout = now + HeartbeatInterval
+			DPrintf("send heartbeat[start]...peerId:%d,term:%d\n", rf.me, rf.currentTerm)
+			rf.mu.Unlock()
+			//这里异步执行效率会更高，不然可能会影响到下一次心跳
+			go rf.broadcastEntry()
+		}
+		doSendHeartBeat()
+		time.Sleep(10 * time.Millisecond)
 	}
-	//更新下一次发送心跳时间
-	rf.heartbeatTimeout = now + HeartbeatInterval
-	DPrintf("send heartbeat[start]...peerId:%d,term:%d\n", rf.me, rf.currentTerm)
-	rf.mu.Unlock()
-	//这里异步执行效率会更高，不然可能会影响到下一次心跳
-	go rf.broadcastEntry()
 }
 
 func (rf *Raft) leaderElection() {
