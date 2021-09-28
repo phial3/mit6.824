@@ -674,7 +674,8 @@ func (rf *Raft) broadcastEntry() {
 							rf.nextIndex[peerId] = reply.ConflictLogFirstIdx
 						} else {
 							idx := args.PrevLogIndex
-							for idx >= reply.ConflictLogFirstIdx && rf.logType.index(idx).Term != reply.ConflictLogTerm {
+							for idx >= reply.ConflictLogFirstIdx && idx >= rf.logType.LastSnapshotIdx &&
+								rf.logType.index(idx).Term != reply.ConflictLogTerm {
 								idx--
 							}
 							rf.nextIndex[peerId] = idx + 1
