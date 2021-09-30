@@ -103,6 +103,10 @@ type Raft struct {
 	applyCond *sync.Cond
 }
 
+func (rf *Raft) GetPersister() *Persister {
+	return rf.persister
+}
+
 func (rf *Raft) GetCommitIndex() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()

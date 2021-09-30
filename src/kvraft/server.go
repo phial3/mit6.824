@@ -4,6 +4,8 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -222,15 +224,55 @@ func (kv *KVServer) applyEntry() {
 				panic("unknown command" + op.Command)
 			}
 			kv.lastApply = msg.CommandIndex
+			if kv.maxraftstate > 0 {
+				if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
+					fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
+					//计算快照
+					snapshot := kv.encodeState()
+					kv.rf.Snapshot(msg.CommandIndex, snapshot)
+				}
+			}
 			kv.mu.Unlock()
 			//通知所有等待线程
 			kv.notifyCommit(msg.CommandIndex, &msg)
+		} else if msg.SnapshotValid {
+			//follower落后太多的场景需要更新快照
+			DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
+			if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+				kv.lastApply = msg.CommandIndex
+			}
 		} else {
 			//leader change,发送no-op
 			logIdx, _, _ := kv.rf.Start(Op{NOOP, "", "", 0, 0})
 			DPrintf("写入NOOP...peerId:%d,logIdx:%d", kv.me, logIdx)
 			kv.mu.Unlock()
 		}
+	}
+}
+
+func (kv *KVServer) encodeState() []byte {
+	w := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(w)
+	encoder.Encode(kv.data)
+	encoder.Encode(kv.lastApplyUniqId)
+	encoder.Encode(kv.lastApply)
+	return w.Bytes()
+}
+
+func (kv *KVServer) readPersist() {
+	snapshot := kv.rf.GetPersister().ReadSnapshot()
+	if snapshot == nil || len(snapshot) < 1 {
+		return
+	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	r := bytes.NewBuffer(snapshot)
+	decoder := labgob.NewDecoder(r)
+	if decoder.Decode(&kv.data) != nil ||
+		decoder.Decode(&kv.lastApplyUniqId) != nil || decoder.Decode(&kv.lastApply) != nil {
+		DPrintf("read persist fail...peerId:%d", kv.me)
+	} else {
+		DPrintf("read persist success...peerId:%d", kv.me)
 	}
 }
 
@@ -287,6 +329,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.lastApply = 0
 	kv.lastApplyUniqId = make(map[int]int64)
 
+	kv.readPersist()
 	go kv.applyEntry()
 	// You may need initialization code here.
 
