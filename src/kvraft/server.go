@@ -5,7 +5,6 @@ import (
 	"6.824/labrpc"
 	"6.824/raft"
 	"bytes"
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -226,7 +225,7 @@ func (kv *KVServer) applyEntry() {
 			kv.lastApply = msg.CommandIndex
 			if kv.maxraftstate > 0 {
 				if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
-					fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
+					//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
 					//计算快照
 					snapshot := kv.encodeState()
 					kv.rf.Snapshot(msg.CommandIndex, snapshot)

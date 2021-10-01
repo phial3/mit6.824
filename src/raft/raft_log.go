@@ -43,7 +43,19 @@ func (l *LogType) trimFirst(startIdx int) {
 	if startIdx < l.LastSnapshotIdx {
 		panic(fmt.Sprintf("idx err...idx:%d,snapshotIdx:%d", startIdx, l.LastSnapshotIdx))
 	}
-	l.Entries = l.Entries[startIdx-l.LastSnapshotIdx:]
+	//这里要注意，由于slice使用的是引用，只引用了某一段的话GC不会对这部分空间释放，因此我们需要新增一个新的数组
+	//https://zhuanlan.zhihu.com/p/149381458
+	size := len(l.Entries) - (startIdx - l.LastSnapshotIdx)
+	if size < LogInitSize {
+		size = LogInitSize
+	}
+	arr := make([]LogEntry, 0, size)
+	for i := startIdx - l.LastSnapshotIdx; i < len(l.Entries); i++ {
+		arr = append(arr, l.Entries[i])
+	}
+	l.Entries = arr
+	//l.Entries = l.Entries[startIdx-l.LastSnapshotIdx:]
+	l.LastSnapshotIdx = startIdx
 }
 
 func (l *LogType) append(log LogEntry) {

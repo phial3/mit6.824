@@ -20,6 +20,7 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -221,9 +222,14 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		rf.mu.Unlock()
 	}()
 	//下标0依然可以作为校验上一条log的校验条件
+	//encodeState := rf.encodeState()
+	//fmt.Printf("before:%d\n", len(encodeState))
 	rf.logType.trimFirst(index)
-	rf.logType.LastSnapshotIdx = index
+	//rf.logType.LastSnapshotIdx = index
 	state := rf.encodeState()
+	if len(state) > 40000 {
+		fmt.Printf("after:%d\n", len(state))
+	}
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 }
 
@@ -776,7 +782,7 @@ const HeartbeatInterval = 100
 const MinElectionTimeout = 150
 const MaxElectionTimeout = 300
 
-const LogInitSize = 1000
+const LogInitSize = 100
 
 //
 // the service or tester wants to create a Raft server. the ports
