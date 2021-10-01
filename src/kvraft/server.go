@@ -5,9 +5,11 @@ import (
 	"6.824/labrpc"
 	"6.824/raft"
 	"bytes"
+	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -192,60 +194,72 @@ func (kv *KVServer) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
 		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
-		kv.mu.Lock()
-		if msg.CommandValid {
-			op := msg.Command.(Op)
-			switch op.Command {
-			case PutCommand:
-				//针对客户端请求的幂等处理
-				lastId := kv.getLastApplyUniqId(op.ClientId)
-				if op.UniqId > lastId {
-					//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
-					kv.data[op.Key] = op.Value
-					kv.lastApplyUniqId[op.ClientId] = op.UniqId
+		handleMsg := func(msg *raft.ApplyMsg) {
+			kv.mu.Lock()
+			start := time.Now().Second()
+			//fmt.Printf("apply entry[start]...peerId:%d,msg:%+v,logIdx:%d\n", kv.me, msg, msg.CommandIndex)
+			defer func() {
+				end := time.Now().Second()
+				if end-start > 1 {
+					fmt.Printf("apply entry[finish]...peerId:%d,msg:%+v,logIdx:%d,cost:%d\n", kv.me, msg, msg.CommandIndex, end-start)
 				}
-			case AppendCommand:
-				//针对客户端请求的幂等处理
-				lastId := kv.getLastApplyUniqId(op.ClientId)
-				if op.UniqId > lastId {
-					//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
-					v, ok := kv.data[op.Key]
-					if !ok {
+				kv.mu.Unlock()
+			}()
+			if msg.CommandValid {
+				op := msg.Command.(Op)
+				switch op.Command {
+				case PutCommand:
+					//针对客户端请求的幂等处理
+					lastId := kv.getLastApplyUniqId(op.ClientId)
+					if op.UniqId > lastId {
+						//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 						kv.data[op.Key] = op.Value
-					} else {
-						kv.data[op.Key] = v + op.Value
+						kv.lastApplyUniqId[op.ClientId] = op.UniqId
 					}
-					kv.lastApplyUniqId[op.ClientId] = op.UniqId
+				case AppendCommand:
+					//针对客户端请求的幂等处理
+					lastId := kv.getLastApplyUniqId(op.ClientId)
+					if op.UniqId > lastId {
+						//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
+						v, ok := kv.data[op.Key]
+						if !ok {
+							kv.data[op.Key] = op.Value
+						} else {
+							kv.data[op.Key] = v + op.Value
+						}
+						kv.lastApplyUniqId[op.ClientId] = op.UniqId
+					}
+				case GetCommand, NOOP:
+					//no-op
+				default:
+					panic("unknown command" + op.Command)
 				}
-			case GetCommand, NOOP:
-				//no-op
-			default:
-				panic("unknown command" + op.Command)
-			}
-			kv.lastApply = msg.CommandIndex
-			if kv.maxraftstate > 0 {
-				if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
-					//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
-					//计算快照
-					snapshot := kv.encodeState()
-					kv.rf.Snapshot(msg.CommandIndex, snapshot)
-				}
-			}
-			kv.mu.Unlock()
-			//通知所有等待线程
-			kv.notifyCommit(msg.CommandIndex, &msg)
-		} else if msg.SnapshotValid {
-			//follower落后太多的场景需要更新快照
-			DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
-			if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
 				kv.lastApply = msg.CommandIndex
+				if kv.maxraftstate > 0 {
+					if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
+						//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
+						//计算快照
+						snapshot := kv.encodeState()
+						kv.rf.Snapshot(msg.CommandIndex, snapshot)
+					}
+				}
+				kv.mu.Unlock()
+				//通知所有等待线程
+				kv.notifyCommit(msg.CommandIndex, msg)
+				kv.mu.Lock()
+			} else if msg.SnapshotValid {
+				//follower落后太多的场景需要更新快照
+				DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
+				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+					kv.lastApply = msg.CommandIndex
+				}
+			} else {
+				//leader change,发送no-op
+				logIdx, _, _ := kv.rf.Start(Op{NOOP, "", "", 0, 0})
+				DPrintf("写入NOOP...peerId:%d,logIdx:%d", kv.me, logIdx)
 			}
-		} else {
-			//leader change,发送no-op
-			logIdx, _, _ := kv.rf.Start(Op{NOOP, "", "", 0, 0})
-			DPrintf("写入NOOP...peerId:%d,logIdx:%d", kv.me, logIdx)
-			kv.mu.Unlock()
 		}
+		handleMsg(&msg)
 	}
 }
 
