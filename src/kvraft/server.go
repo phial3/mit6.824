@@ -251,7 +251,9 @@ func (kv *KVServer) applyEntry() {
 				//follower落后太多的场景需要更新快照
 				DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
-					kv.lastApply = msg.CommandIndex
+					//kv.lastApply = msg.CommandIndex
+					//data解析
+					kv.readPersist()
 				}
 			} else {
 				//leader change,发送no-op
@@ -277,15 +279,15 @@ func (kv *KVServer) readPersist() {
 	if snapshot == nil || len(snapshot) < 1 {
 		return
 	}
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	//kv.mu.Lock()
+	//defer kv.mu.Unlock()
 	r := bytes.NewBuffer(snapshot)
 	decoder := labgob.NewDecoder(r)
 	if decoder.Decode(&kv.data) != nil ||
 		decoder.Decode(&kv.lastApplyUniqId) != nil || decoder.Decode(&kv.lastApply) != nil {
 		DPrintf("read persist fail...peerId:%d", kv.me)
 	} else {
-		DPrintf("read persist success...peerId:%d", kv.me)
+		DPrintf("read persist success...peerId:%d\n", kv.me)
 	}
 }
 

@@ -20,7 +20,6 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
-	"fmt"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -200,7 +199,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if lastIncludedIndex <= rf.commitIndex {
 		return false
 	}
-	DPrintf("CondInstallSnapshot...peerId:%d,lastIncludedIndex:%d", rf.me, lastIncludedIndex)
+	DPrintf("CondInstallSnapshot...peerId:%d,lastIncludedIndex:%d\n", rf.me, lastIncludedIndex)
 	rf.logType.rebuild(lastIncludedTerm, lastIncludedIndex)
 	state := rf.encodeState()
 	rf.commitIndex = lastIncludedIndex
@@ -215,21 +214,16 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	DPrintf("snapshot[start]...peerId:%d,index:%d", rf.me, index)
+	DPrintf("snapshot[start]...peerId:%d,index:%d\n", rf.me, index)
 	rf.mu.Lock()
 	defer func() {
-		DPrintf("snapshot[finish]...peerId:%d,index:%d", rf.me, index)
+		DPrintf("snapshot[finish]...peerId:%d,index:%d\n", rf.me, index)
 		rf.mu.Unlock()
 	}()
 	//下标0依然可以作为校验上一条log的校验条件
-	//encodeState := rf.encodeState()
-	//fmt.Printf("before:%d\n", len(encodeState))
 	rf.logType.trimFirst(index)
 	//rf.logType.LastSnapshotIdx = index
 	state := rf.encodeState()
-	if len(state) > 40000 {
-		fmt.Printf("after:%d\n", len(state))
-	}
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 }
 
