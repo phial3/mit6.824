@@ -471,25 +471,6 @@ func TestUnreliableOneKey3A(t *testing.T) {
 	cfg.end()
 }
 
-func Test(t *testing.T) {
-	mp := make(map[int][]chan int)
-	mp[0] = make([]chan int, 0, 10)
-	for i := 0; i < 2; i++ {
-		go func() {
-			ch := make(chan int)
-			mp[0] = append(mp[0], ch)
-			fmt.Printf("wait\n")
-			msg := <-ch
-			fmt.Printf("get %d\n", msg)
-		}()
-	}
-	time.Sleep(1 * time.Second)
-	for _, ch := range mp[0] {
-		ch <- 1
-	}
-	time.Sleep(1 * time.Second)
-}
-
 // Submit a request in the minority partition and check that the requests
 // doesn't go through until the partition heals.  The leader in the original
 // network ends up in the minority partition.

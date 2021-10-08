@@ -103,6 +103,10 @@ type Raft struct {
 	applyCond *sync.Cond
 }
 
+func (rf *Raft) GetPersister() *Persister {
+	return rf.persister
+}
+
 func (rf *Raft) GetCommitIndex() int {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -195,7 +199,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	if lastIncludedIndex <= rf.commitIndex {
 		return false
 	}
-	DPrintf("CondInstallSnapshot...peerId:%d,lastIncludedIndex:%d", rf.me, lastIncludedIndex)
+	DPrintf("CondInstallSnapshot...peerId:%d,lastIncludedIndex:%d\n", rf.me, lastIncludedIndex)
 	rf.logType.rebuild(lastIncludedTerm, lastIncludedIndex)
 	state := rf.encodeState()
 	rf.commitIndex = lastIncludedIndex
@@ -210,15 +214,15 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-	DPrintf("snapshot[start]...peerId:%d,index:%d", rf.me, index)
+	DPrintf("snapshot[start]...peerId:%d,index:%d\n", rf.me, index)
 	rf.mu.Lock()
 	defer func() {
-		DPrintf("snapshot[finish]...peerId:%d,index:%d", rf.me, index)
+		DPrintf("snapshot[finish]...peerId:%d,index:%d\n", rf.me, index)
 		rf.mu.Unlock()
 	}()
 	//下标0依然可以作为校验上一条log的校验条件
 	rf.logType.trimFirst(index)
-	rf.logType.LastSnapshotIdx = index
+	//rf.logType.LastSnapshotIdx = index
 	state := rf.encodeState()
 	rf.persister.SaveStateAndSnapshot(state, snapshot)
 }
@@ -772,7 +776,7 @@ const HeartbeatInterval = 100
 const MinElectionTimeout = 150
 const MaxElectionTimeout = 300
 
-const LogInitSize = 1000
+const LogInitSize = 100
 
 //
 // the service or tester wants to create a Raft server. the ports
