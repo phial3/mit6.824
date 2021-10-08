@@ -253,7 +253,7 @@ func (kv *KVServer) applyEntry() {
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
 					//kv.lastApply = msg.CommandIndex
 					//data解析
-					kv.readPersist()
+					kv.readPersist(msg.Snapshot)
 				}
 			} else {
 				//leader change,发送no-op
@@ -274,8 +274,8 @@ func (kv *KVServer) encodeState() []byte {
 	return w.Bytes()
 }
 
-func (kv *KVServer) readPersist() {
-	snapshot := kv.rf.GetPersister().ReadSnapshot()
+func (kv *KVServer) readPersist(snapshot []byte) {
+	//snapshot := kv.rf.GetPersister().ReadSnapshot()
 	if snapshot == nil || len(snapshot) < 1 {
 		return
 	}
@@ -344,7 +344,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.lastApply = 0
 	kv.lastApplyUniqId = make(map[int]int64)
 
-	kv.readPersist()
+	snapshot := kv.rf.GetPersister().ReadSnapshot()
+	kv.readPersist(snapshot)
 	go kv.applyEntry()
 	// You may need initialization code here.
 
