@@ -1,9 +1,22 @@
 package shardctrler
 
-import "6.824/raft"
+import (
+	"6.824/raft"
+	"log"
+	"sync/atomic"
+)
 import "6.824/labrpc"
 import "sync"
 import "6.824/labgob"
+
+const Debug = false
+
+func DPrintf(format string, a ...interface{}) (n int, err error) {
+	if Debug {
+		log.Printf(format, a...)
+	}
+	return
+}
 
 type ShardCtrler struct {
 	mu      sync.Mutex
@@ -12,12 +25,12 @@ type ShardCtrler struct {
 	applyCh chan raft.ApplyMsg
 
 	// Your data here.
-
 	configs []Config // indexed by config num
 	//等待raft提交，这里有一个问题，
 	//假设发生网络分区的场景，长时间都提交不了是否会有问题？
 	//假设刚提交的log被新选举的leader抹除和覆盖，如何唤醒正在等待的提交的线程
 	replyChan map[int]chan *CommitReply
+	dead      int32 // set by Kill()
 }
 
 //表示当前的commit log是否由新的leader产生
@@ -52,28 +65,6 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 		reply.WrongLeader = false
 		reply.Err = OK
 	}
-}
-
-//构建log并提交到raft
-func (sc *ShardCtrler) appendToRaft(op *Op) *CommitReply {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	if _, isLeader := sc.rf.GetState(); !isLeader {
-		return &CommitReply{true}
-	}
-	logIdx, _, success := sc.rf.Start(op)
-	if !success {
-		return &CommitReply{true}
-	}
-	//等待过半数提交
-	ch := make(chan *CommitReply)
-	sc.replyChan[logIdx] = ch
-	sc.mu.Unlock()
-	reply := <-ch
-	sc.mu.Lock()
-	//删除key，释放空间
-	delete(sc.replyChan, logIdx)
-	return reply
 }
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
@@ -122,6 +113,28 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	}
 }
 
+//构建log并提交到raft
+func (sc *ShardCtrler) appendToRaft(op *Op) *CommitReply {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if _, isLeader := sc.rf.GetState(); !isLeader {
+		return &CommitReply{true}
+	}
+	logIdx, _, success := sc.rf.Start(op)
+	if !success {
+		return &CommitReply{true}
+	}
+	//等待过半数提交
+	ch := make(chan *CommitReply)
+	sc.replyChan[logIdx] = ch
+	sc.mu.Unlock()
+	reply := <-ch
+	sc.mu.Lock()
+	//删除key，释放空间
+	delete(sc.replyChan, logIdx)
+	return reply
+}
+
 //
 // the tester calls Kill() when a ShardCtrler instance won't
 // be needed again. you are not required to do anything
@@ -131,6 +144,12 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 func (sc *ShardCtrler) Kill() {
 	sc.rf.Kill()
 	// Your code here, if desired.
+	atomic.StoreInt32(&sc.dead, 1)
+}
+
+func (sc *ShardCtrler) killed() bool {
+	z := atomic.LoadInt32(&sc.dead)
+	return z == 1
 }
 
 // needed by shardkv tester
@@ -154,8 +173,51 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	labgob.Register(Op{})
 	sc.applyCh = make(chan raft.ApplyMsg)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
-
 	// Your code here.
-
+	sc.dead = 0
 	return sc
+}
+
+//更新状态机数据，需要保证时序，这里只能使用单线程
+func (sc *ShardCtrler) applyEntry() {
+	for !sc.killed() {
+		msg := <-sc.applyCh
+		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", sc.me, msg, msg.CommandIndex)
+		handleMsg := func(msg *raft.ApplyMsg) {
+			sc.mu.Lock()
+			defer func() {
+				sc.mu.Unlock()
+			}()
+			if msg.CommandValid {
+				op := msg.Command.(Op)
+				switch op.CmdType {
+				case JoinCommand:
+					//args := op.Args.(JoinArgs)
+					configId := len(sc.configs)
+					//shards := make([]int, NShards)
+					groups := make(map[int][]string)
+					//TODO:分配策略
+					sc.configs = append(sc.configs, Config{Num: configId, Groups: groups})
+				case LeaveCommand:
+				case MoveCommand:
+				case QueryCommand:
+				case NOOP:
+					//no-op
+				default:
+					panic("unknown command" + op.CmdType)
+				}
+				//唤醒等待线程
+				if ch, ok := sc.replyChan[msg.CommandIndex]; ok {
+					sc.mu.Unlock()
+					ch <- &CommitReply{true}
+					sc.mu.Lock()
+				}
+			} else {
+				//leader change,发送no-op
+				logIdx, _, _ := sc.rf.Start(&Op{NOOP, nil, sc.me})
+				DPrintf("写入NOOP...peerId:%d,logIdx:%d", sc.me, logIdx)
+			}
+		}
+		handleMsg(&msg)
+	}
 }
