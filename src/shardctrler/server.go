@@ -202,6 +202,16 @@ func (sc *ShardCtrler) applyEntry() {
 				case MoveCommand:
 				case QueryCommand:
 				case NOOP:
+					//唤醒所有等待的线程,后面提交到raft的log都认为失败
+					if op.Leader != sc.me {
+						for _, ch := range sc.replyChan {
+							//TODO:这里是否会有线程安全问题?
+							sc.mu.Unlock()
+							ch <- &CommitReply{true}
+							sc.mu.Lock()
+						}
+						return
+					}
 					//no-op
 				default:
 					panic("unknown command" + op.CmdType)
