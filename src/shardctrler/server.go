@@ -120,7 +120,7 @@ func (sc *ShardCtrler) appendToRaft(op *Op) *CommitReply {
 	if _, isLeader := sc.rf.GetState(); !isLeader {
 		return &CommitReply{true}
 	}
-	logIdx, _, success := sc.rf.Start(op)
+	logIdx, _, success := sc.rf.Start(*op)
 	if !success {
 		return &CommitReply{true}
 	}
@@ -171,10 +171,16 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.configs[0].Groups = map[int][]string{}
 
 	labgob.Register(Op{})
+	labgob.Register(JoinArgs{})
+	labgob.Register(LeaveArgs{})
+	labgob.Register(MoveArgs{})
+	labgob.Register(QueryArgs{})
 	sc.applyCh = make(chan raft.ApplyMsg)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
 	// Your code here.
 	sc.dead = 0
+	sc.replyChan = make(map[int]chan *CommitReply)
+	go sc.applyEntry()
 	return sc
 }
 
@@ -192,23 +198,44 @@ func (sc *ShardCtrler) applyEntry() {
 				op := msg.Command.(Op)
 				switch op.CmdType {
 				case JoinCommand:
-					//args := op.Args.(JoinArgs)
-					configId := len(sc.configs)
-					//shards := make([]int, NShards)
-					groups := make(map[int][]string)
-					//TODO:分配策略
-					sc.configs = append(sc.configs, Config{Num: configId, Groups: groups})
+					args := op.Args.(*JoinArgs)
+					last := sc.configs[len(sc.configs)-1]
+					new := last.Clone()
+					new.Num = len(sc.configs)
+					for gid, servers := range args.Servers {
+						new.Groups[gid] = servers
+					}
+					//重新分配
+					new.Balance()
+					sc.configs = append(sc.configs, *new)
 				case LeaveCommand:
+					args := op.Args.(*LeaveArgs)
+					last := sc.configs[len(sc.configs)-1]
+					new := last.Clone()
+					new.Num = len(sc.configs)
+					for _, gid := range args.GIDs {
+						delete(new.Groups, gid)
+					}
+					//重新分配
+					new.Balance()
+					sc.configs = append(sc.configs, *new)
 				case MoveCommand:
+					args := op.Args.(*MoveArgs)
+					last := sc.configs[len(sc.configs)-1]
+					new := last.Clone()
+					new.Num = len(sc.configs)
+					new.Shards[args.Shard] = args.GID
+					sc.configs = append(sc.configs, *new)
 				case QueryCommand:
+					//do nothing
 				case NOOP:
 					//唤醒所有等待的线程,后面提交到raft的log都认为失败
 					if op.Leader != sc.me {
 						for _, ch := range sc.replyChan {
 							//TODO:这里是否会有线程安全问题?
-							sc.mu.Unlock()
+							//sc.mu.Unlock()
 							ch <- &CommitReply{true}
-							sc.mu.Lock()
+							//sc.mu.Lock()
 						}
 						return
 					}
@@ -218,13 +245,13 @@ func (sc *ShardCtrler) applyEntry() {
 				}
 				//唤醒等待线程
 				if ch, ok := sc.replyChan[msg.CommandIndex]; ok {
-					sc.mu.Unlock()
-					ch <- &CommitReply{true}
-					sc.mu.Lock()
+					//sc.mu.Unlock()
+					ch <- &CommitReply{false}
+					//sc.mu.Lock()
 				}
 			} else {
 				//leader change,发送no-op
-				logIdx, _, _ := sc.rf.Start(&Op{NOOP, nil, sc.me})
+				logIdx, _, _ := sc.rf.Start(Op{NOOP, nil, sc.me})
 				DPrintf("写入NOOP...peerId:%d,logIdx:%d", sc.me, logIdx)
 			}
 		}
