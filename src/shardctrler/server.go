@@ -56,7 +56,7 @@ type Op struct {
 
 func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
-	op := Op{JoinCommand, args, 0}
+	op := Op{JoinCommand, *args, 0}
 	commitReply := sc.appendToRaft(&op)
 	if commitReply.WrongLeader {
 		reply.WrongLeader = true
@@ -69,7 +69,7 @@ func (sc *ShardCtrler) Join(args *JoinArgs, reply *JoinReply) {
 
 func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 	// Your code here.
-	op := Op{LeaveCommand, args, 0}
+	op := Op{LeaveCommand, *args, 0}
 	commitReply := sc.appendToRaft(&op)
 	if commitReply.WrongLeader {
 		reply.WrongLeader = true
@@ -82,7 +82,7 @@ func (sc *ShardCtrler) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
-	op := Op{MoveCommand, args, 0}
+	op := Op{MoveCommand, *args, 0}
 	commitReply := sc.appendToRaft(&op)
 	if commitReply.WrongLeader {
 		reply.WrongLeader = true
@@ -95,7 +95,7 @@ func (sc *ShardCtrler) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
-	op := Op{QueryCommand, args, 0}
+	op := Op{QueryCommand, *args, 0}
 	commitReply := sc.appendToRaft(&op)
 	if commitReply.WrongLeader {
 		reply.WrongLeader = true
@@ -198,7 +198,7 @@ func (sc *ShardCtrler) applyEntry() {
 				op := msg.Command.(Op)
 				switch op.CmdType {
 				case JoinCommand:
-					args := op.Args.(*JoinArgs)
+					args := op.Args.(JoinArgs)
 					last := sc.configs[len(sc.configs)-1]
 					new := last.Clone()
 					new.Num = len(sc.configs)
@@ -209,7 +209,7 @@ func (sc *ShardCtrler) applyEntry() {
 					new.Balance()
 					sc.configs = append(sc.configs, *new)
 				case LeaveCommand:
-					args := op.Args.(*LeaveArgs)
+					args := op.Args.(LeaveArgs)
 					last := sc.configs[len(sc.configs)-1]
 					new := last.Clone()
 					new.Num = len(sc.configs)
@@ -220,7 +220,7 @@ func (sc *ShardCtrler) applyEntry() {
 					new.Balance()
 					sc.configs = append(sc.configs, *new)
 				case MoveCommand:
-					args := op.Args.(*MoveArgs)
+					args := op.Args.(MoveArgs)
 					last := sc.configs[len(sc.configs)-1]
 					new := last.Clone()
 					new.Num = len(sc.configs)

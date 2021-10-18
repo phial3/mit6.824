@@ -1,5 +1,7 @@
 package shardctrler
 
+import "sort"
+
 //
 // Shard controler: assigns shards to replication groups.
 //
@@ -48,8 +50,12 @@ func (config *Config) Balance() {
 		gids[idx] = gid
 		idx++
 	}
-	for i := 0; i < NShards; i++ {
-		config.Shards[i] = gids[i%len(config.Groups)]
+	//需要根据gid做一次排序，不然不同机器可能会得到不同的结果
+	sort.Ints(gids)
+	if len(config.Groups) > 0 {
+		for i := 0; i < NShards; i++ {
+			config.Shards[i] = gids[i%len(config.Groups)]
+		}
 	}
 }
 
