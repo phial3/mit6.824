@@ -5,14 +5,12 @@ import (
 	"6.824/labrpc"
 	"6.824/raft"
 	"bytes"
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -39,6 +37,8 @@ type Op struct {
 	ClientId int
 	//这个唯一ID是每个客户端生成的唯一ID
 	UniqId int64
+	//NOOP的时候需要判断新的Leader是否为自己，不是的话需要唤醒等待的service线程
+	Leader int
 }
 
 type KVServer struct {
@@ -63,38 +63,13 @@ type KVServer struct {
 	//简单来说，就是下面的两个假设都是不成立的
 	//1.log相同的index只会出现一次
 	//2.如果相同的index的log出现两次，那么第一个返回的log必然失败
-	waitCh map[int][]chan raft.ApplyMsg
+	//waitCh map[int][]chan raft.ApplyMsg
 	//幂等保证，为每个客户端唯一一个最后提交的uniqId。这里有个大前提，每个客户端的请求是串行的
 	lastApplyUniqId map[int]int64
-}
-
-func (kv *KVServer) waitCommit(logIdx int) *chan raft.ApplyMsg {
-	_, ok := kv.waitCh[logIdx]
-	if !ok {
-		kv.waitCh[logIdx] = make([]chan raft.ApplyMsg, 0, 10)
-	}
-	ch := make(chan raft.ApplyMsg)
-	kv.waitCh[logIdx] = append(kv.waitCh[logIdx], ch)
-	return &ch
-}
-
-func (kv *KVServer) notifyCommit(logIdx int, msg *raft.ApplyMsg) {
-	kv.mu.Lock()
-	_, ok := kv.waitCh[logIdx]
-	if !ok {
-		kv.mu.Unlock()
-		return
-	}
-	//这里可能存在一个时序的问题，有可能在创建wait chan之前就已经commit成功，我们需要把之前
-	//通知所有等待的线程
-	for _, ch := range kv.waitCh[logIdx] {
-		kv.mu.Unlock()
-		ch <- *msg
-		kv.mu.Lock()
-	}
-	//清理空间
-	//delete(kv.waitCh, logIdx)
-	kv.mu.Unlock()
+	//等待raft提交，这里有一个问题，
+	//假设发生网络分区的场景，长时间都提交不了是否会有问题？
+	//假设刚提交的log被新选举的leader抹除和覆盖，如何唤醒正在等待的提交的线程
+	replyChan map[int]chan *CommitReply
 }
 
 func (kv *KVServer) getLastApplyUniqId(clientId int) int64 {
@@ -108,40 +83,21 @@ func (kv *KVServer) getLastApplyUniqId(clientId int) int64 {
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+	// Your code here.
 	DPrintf("Get request[start]...peerId:%d,args:%+v", kv.me, args)
 	defer func() {
 		DPrintf("Get request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
-	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.Err = ErrWrongLeader
-		reply.Value = ""
-		return
-	}
-	//为了保证线性一致性，这里需要增加一个相当于ReadLog的做法
-	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId}
-	kv.mu.Lock()
-	logIdx, _, success := kv.rf.Start(op)
-	if !success {
-		kv.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		return
-	}
-	DPrintf("append log to raft...peerId:%d,args:%+v,logIdx:%d", kv.me, args, logIdx)
-	//log.Printf("get wait[start]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	//等待过半数提交
-	ch := kv.waitCommit(logIdx)
-	kv.mu.Unlock()
-	msg := <-*ch
-	//log.Printf("get wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	command := msg.Command.(Op)
-	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
+	//read log
+	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId, 0}
+	commitReply := kv.appendToRaft(&op)
+	if commitReply.WrongLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
 	kv.mu.Lock()
-	value, exsit := kv.data[args.Key]
-	if !exsit {
+	value, exist := kv.data[args.Key]
+	if !exist {
 		reply.Err = ErrNoKey
 		reply.Value = ""
 		kv.mu.Unlock()
@@ -154,39 +110,45 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+	// Your code here.
 	DPrintf("PutAppend request[start]...peerId:%d,args:%+v", kv.me, args)
 	defer func() {
 		DPrintf("PutAppend request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
-	// Your code here.
-	if _, isLeader := kv.rf.GetState(); !isLeader {
-		reply.Err = ErrWrongLeader
-		return
-	}
-	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId}
-	//注意，这里一定要加锁，不然可能会导致commit返回比下面的wait chan创建还快的场景
-	kv.mu.Lock()
-	logIdx, _, success := kv.rf.Start(op)
-	if !success {
-		kv.mu.Unlock()
-		reply.Err = ErrWrongLeader
-		return
-	}
-	DPrintf("append log to raft...peerId:%d,args:%+v,logIdx:%d", kv.me, args, logIdx)
-	//等待过半数提交
-	//log.Printf("putAppend wait[start]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	ch := kv.waitCommit(logIdx)
-	kv.mu.Unlock()
-	msg := <-*ch
-	//log.Printf("putAppend wait[finish]...peerId:%d,logIdx:%d", kv.me, logIdx)
-	command := msg.Command.(Op)
-	//提交日志后了，重新发生选举，然后把当前的log删除
-	if command.ClientId != op.ClientId || command.UniqId != op.UniqId {
-		reply.Err = ErrWrongLeader
-		return
-	}
+	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId, 0}
+	commitReply := kv.appendToRaft(&op)
 	reply.Err = OK
-	return
+	if commitReply.WrongLeader {
+		reply.Err = ErrWrongLeader
+	}
+}
+
+//表示当前的commit log是否由新的leader产生
+type CommitReply struct {
+	WrongLeader bool
+}
+
+//构建log并提交到raft
+func (kv *KVServer) appendToRaft(op *Op) *CommitReply {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if _, isLeader := kv.rf.GetState(); !isLeader {
+		return &CommitReply{true}
+	}
+	logIdx, _, success := kv.rf.Start(*op)
+	if !success {
+		return &CommitReply{true}
+	}
+	DPrintf("append to raft...peerId:%d,command:%+v,logIdx:%d", kv.me, op, logIdx)
+	//等待过半数提交
+	ch := make(chan *CommitReply)
+	kv.replyChan[logIdx] = ch
+	kv.mu.Unlock()
+	reply := <-ch
+	kv.mu.Lock()
+	//删除key，释放空间
+	delete(kv.replyChan, logIdx)
+	return reply
 }
 
 //更新状态机数据，需要保证时序，这里只能使用单线程
@@ -196,13 +158,8 @@ func (kv *KVServer) applyEntry() {
 		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
 		handleMsg := func(msg *raft.ApplyMsg) {
 			kv.mu.Lock()
-			start := time.Now().Second()
 			//fmt.Printf("apply entry[start]...peerId:%d,msg:%+v,logIdx:%d\n", kv.me, msg, msg.CommandIndex)
 			defer func() {
-				end := time.Now().Second()
-				if end-start > 1 {
-					fmt.Printf("apply entry[finish]...peerId:%d,msg:%+v,logIdx:%d,cost:%d\n", kv.me, msg, msg.CommandIndex, end-start)
-				}
 				kv.mu.Unlock()
 			}()
 			if msg.CommandValid {
@@ -229,8 +186,29 @@ func (kv *KVServer) applyEntry() {
 						}
 						kv.lastApplyUniqId[op.ClientId] = op.UniqId
 					}
-				case GetCommand, NOOP:
-					//no-op
+				case GetCommand:
+				//do nothing
+				case NOOP:
+					//唤醒所有等待的线程,后面提交到raft的log都认为失败
+					if op.Leader != kv.me && len(kv.replyChan) > 0 {
+						DPrintf("唤醒等待提交的线程...peerId:%d", kv.me)
+						wakeup := make([]chan *CommitReply, len(kv.replyChan))
+						idx := 0
+						for _, ch := range kv.replyChan {
+							wakeup[idx] = ch
+							idx++
+						}
+						//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
+						/*for _, ch := range kv.replyChan {
+							ch <- &CommitReply{true}
+						}*/
+						kv.mu.Unlock()
+						for _, ch := range wakeup {
+							ch <- &CommitReply{true}
+						}
+						kv.mu.Lock()
+						return
+					}
 				default:
 					panic("unknown command" + op.Command)
 				}
@@ -243,10 +221,12 @@ func (kv *KVServer) applyEntry() {
 						kv.rf.Snapshot(msg.CommandIndex, snapshot)
 					}
 				}
-				kv.mu.Unlock()
 				//通知所有等待线程
-				kv.notifyCommit(msg.CommandIndex, msg)
-				kv.mu.Lock()
+				if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
+					kv.mu.Unlock()
+					ch <- &CommitReply{false}
+					kv.mu.Lock()
+				}
 			} else if msg.SnapshotValid {
 				//follower落后太多的场景需要更新快照
 				DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
@@ -257,7 +237,7 @@ func (kv *KVServer) applyEntry() {
 				}
 			} else {
 				//leader change,发送no-op
-				logIdx, _, _ := kv.rf.Start(Op{NOOP, "", "", 0, 0})
+				logIdx, _, _ := kv.rf.Start(Op{NOOP, "", "", 0, 0, kv.me})
 				DPrintf("写入NOOP...peerId:%d,logIdx:%d", kv.me, logIdx)
 			}
 		}
@@ -339,7 +319,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.data = make(map[string]string)
 	//kv.applyCh = make(chan raft.ApplyMsg, 10)
 	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.waitCh = make(map[int][]chan raft.ApplyMsg)
+	//kv.waitCh = make(map[int][]chan raft.ApplyMsg)
+	kv.replyChan = make(map[int]chan *CommitReply)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.lastApply = 0
 	kv.lastApplyUniqId = make(map[int]int64)

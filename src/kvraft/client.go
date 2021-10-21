@@ -62,27 +62,11 @@ func (ck *Clerk) Get(key string) string {
 	uniqId := ck.genUniqId()
 	args := GetArgs{key, ck.clientId, uniqId}
 	reply := GetReply{}
-	DPrintf("client get...key:%s", key)
-	ok := ck.servers[ck.leader].Call("KVServer.Get", &args, &reply)
-	if ok && reply.Err == OK {
-		return reply.Value
-	}
-	//这种写法其实是不严谨的，but实验要求这么写，先简单实现。
-	for {
-		for peerId := range ck.servers {
-			ok := ck.servers[peerId].Call("KVServer.Get", &args, &reply)
-			if ok {
-				if reply.Err == OK {
-					ck.leader = peerId
-					return reply.Value
-				} else if reply.Err == ErrNoKey {
-					ck.leader = peerId
-					return ""
-				}
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	ck.sendReq(&args, &reply, "KVServer.Get", func(reply interface{}) bool {
+		r := reply.(*GetReply)
+		return r.Err == OK || r.Err == ErrNoKey
+	})
+	return reply.Value
 }
 
 //
@@ -100,20 +84,26 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	uniqId := ck.genUniqId()
 	args := PutAppendArgs{key, value, op, ck.clientId, uniqId}
 	reply := PutAppendReply{}
-	DPrintf("client putAppend...key:%s,value:%s,op:%s", key, value, op)
-	ok := ck.servers[ck.leader].Call("KVServer.PutAppend", &args, &reply)
-	if ok && reply.Err == OK {
-		return
-	}
-	//由于服务端有可能都还没选举出leader，需要等待
+	ck.sendReq(&args, &reply, "KVServer.PutAppend", func(reply interface{}) bool {
+		r := reply.(*PutAppendReply)
+		return r.Err == OK
+	})
+}
+
+func (ck *Clerk) sendReq(args interface{}, reply interface{}, method string, handleReply func(reply interface{}) bool) {
+	DPrintf("client request...args:%+v", args)
+	//这种写法其实是不严谨的，but实验要求这么写，先简单实现。
 	for {
-		for peerId := range ck.servers {
-			ok := ck.servers[peerId].Call("KVServer.PutAppend", &args, &reply)
-			if ok && reply.Err == OK {
+		//优先尝试上一次成功的server
+		for i := 0; i < len(ck.servers); i++ {
+			peerId := (ck.leader + i) % len(ck.servers)
+			ok := ck.servers[peerId].Call(method, args, reply)
+			if ok && handleReply(reply) {
 				ck.leader = peerId
 				return
 			}
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
