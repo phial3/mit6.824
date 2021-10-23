@@ -116,12 +116,13 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 //构建log并提交到raft
 func (sc *ShardCtrler) appendToRaft(op *Op) *CommitReply {
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
 	if _, isLeader := sc.rf.GetState(); !isLeader {
+		sc.mu.Unlock()
 		return &CommitReply{true}
 	}
 	logIdx, _, success := sc.rf.Start(*op)
 	if !success {
+		sc.mu.Unlock()
 		return &CommitReply{true}
 	}
 	//等待过半数提交
@@ -129,9 +130,6 @@ func (sc *ShardCtrler) appendToRaft(op *Op) *CommitReply {
 	sc.replyChan[logIdx] = ch
 	sc.mu.Unlock()
 	reply := <-ch
-	sc.mu.Lock()
-	//删除key，释放空间
-	delete(sc.replyChan, logIdx)
 	return reply
 }
 
@@ -231,11 +229,10 @@ func (sc *ShardCtrler) applyEntry() {
 				case NOOP:
 					//唤醒所有等待的线程,后面提交到raft的log都认为失败
 					if op.Leader != sc.me {
-						for _, ch := range sc.replyChan {
-							//TODO:这里是否会有线程安全问题?
-							//sc.mu.Unlock()
+						for idx, ch := range sc.replyChan {
 							ch <- &CommitReply{true}
-							//sc.mu.Lock()
+							close(ch)
+							delete(sc.replyChan, idx)
 						}
 						return
 					}
@@ -245,9 +242,9 @@ func (sc *ShardCtrler) applyEntry() {
 				}
 				//唤醒等待线程
 				if ch, ok := sc.replyChan[msg.CommandIndex]; ok {
-					//sc.mu.Unlock()
 					ch <- &CommitReply{false}
-					//sc.mu.Lock()
+					close(ch)
+					delete(sc.replyChan, msg.CommandIndex)
 				}
 			} else {
 				//leader change,发送no-op
