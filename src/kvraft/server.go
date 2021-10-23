@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -97,15 +97,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	kv.mu.Lock()
 	value, exist := kv.data[args.Key]
+	kv.mu.Unlock()
 	if !exist {
 		reply.Err = ErrNoKey
 		reply.Value = ""
-		kv.mu.Unlock()
 		return
 	}
 	reply.Err = OK
 	reply.Value = value
-	kv.mu.Unlock()
 	return
 }
 
@@ -131,12 +130,14 @@ type CommitReply struct {
 //构建log并提交到raft
 func (kv *KVServer) appendToRaft(op *Op) *CommitReply {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
+	//defer kv.mu.Unlock()
 	if _, isLeader := kv.rf.GetState(); !isLeader {
+		kv.mu.Unlock()
 		return &CommitReply{true}
 	}
 	logIdx, _, success := kv.rf.Start(*op)
 	if !success {
+		kv.mu.Unlock()
 		return &CommitReply{true}
 	}
 	DPrintf("append to raft...peerId:%d,command:%+v,logIdx:%d", kv.me, op, logIdx)
@@ -145,9 +146,9 @@ func (kv *KVServer) appendToRaft(op *Op) *CommitReply {
 	kv.replyChan[logIdx] = ch
 	kv.mu.Unlock()
 	reply := <-ch
-	kv.mu.Lock()
+	//kv.mu.Lock()
 	//删除key，释放空间
-	delete(kv.replyChan, logIdx)
+	//delete(kv.replyChan, logIdx)
 	return reply
 }
 
@@ -192,21 +193,23 @@ func (kv *KVServer) applyEntry() {
 					//唤醒所有等待的线程,后面提交到raft的log都认为失败
 					if op.Leader != kv.me && len(kv.replyChan) > 0 {
 						DPrintf("唤醒等待提交的线程...peerId:%d", kv.me)
-						wakeup := make([]chan *CommitReply, len(kv.replyChan))
+						/*wakeup := make([]chan *CommitReply, len(kv.replyChan))
 						idx := 0
 						for _, ch := range kv.replyChan {
 							wakeup[idx] = ch
 							idx++
-						}
-						//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
-						/*for _, ch := range kv.replyChan {
-							ch <- &CommitReply{true}
 						}*/
-						kv.mu.Unlock()
+						//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
+						for idx, ch := range kv.replyChan {
+							ch <- &CommitReply{true}
+							close(ch)
+							delete(kv.replyChan, idx)
+						}
+						/*kv.mu.Unlock()
 						for _, ch := range wakeup {
 							ch <- &CommitReply{true}
-						}
-						kv.mu.Lock()
+						}*/
+						//kv.mu.Lock()
 						return
 					}
 				default:
@@ -223,9 +226,11 @@ func (kv *KVServer) applyEntry() {
 				}
 				//通知所有等待线程
 				if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
-					kv.mu.Unlock()
+					//kv.mu.Unlock()
 					ch <- &CommitReply{false}
-					kv.mu.Lock()
+					close(ch)
+					delete(kv.replyChan, msg.CommandIndex)
+					//kv.mu.Lock()
 				}
 			} else if msg.SnapshotValid {
 				//follower落后太多的场景需要更新快照

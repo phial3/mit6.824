@@ -555,6 +555,8 @@ func TestManyPartitionsOneClient3A(t *testing.T) {
 }
 
 func TestManyPartitionsManyClients3A(t *testing.T) {
+	//debugger := util.Debugger{}
+	//debugger.StartHTTPDebugger()
 	// Test: partitions, many clients (3A) ...
 	GenericTest(t, "3A", 5, 5, false, false, true, -1, false)
 }

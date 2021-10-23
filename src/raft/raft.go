@@ -832,7 +832,7 @@ func (rf *Raft) applyEntry() {
 		}
 		rf.lastApplied++
 		applyMsg := ApplyMsg{CommandValid: true, Command: rf.logType.index(rf.lastApplied).Command, CommandIndex: rf.lastApplied}
-		DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d", rf.me,
+		DPrintf("log commit...peerId:%d,index:%d,command:%+v,term:%d\n", rf.me,
 			applyMsg.CommandIndex, applyMsg.Command, rf.logType.index(rf.lastApplied).Term)
 		rf.mu.Unlock()
 		rf.applyCh <- applyMsg
