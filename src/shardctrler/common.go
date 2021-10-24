@@ -1,6 +1,8 @@
 package shardctrler
 
-import "sort"
+import (
+	"sort"
+)
 
 //
 // Shard controler: assigns shards to replication groups.
@@ -70,6 +72,7 @@ type Group struct {
 	Shards []int
 }
 
+//这里的分片逻辑写得有点恶心，没有BST的数据结构写起来有点难受
 func (config *Config) Balance() {
 	size := len(config.Groups)
 	if size == 0 {
@@ -102,10 +105,11 @@ func (config *Config) Balance() {
 		}
 	}
 	//为了确保不同副本的结果固定，需要做一次排序
-	groupList := make([]Group, len(groups))
+	groupList := make([]*Group, len(groups))
 	idx := 0
 	for gid := range groups {
-		groupList[idx] = Group{gid, groups[gid]}
+		groupList[idx] = &Group{gid, groups[gid]}
+		idx++
 	}
 	sort.Slice(groupList, func(i, j int) bool {
 		l1 := len(groupList[i].Shards)
