@@ -96,7 +96,7 @@ func (config *Config) Balance() {
 	for i := 0; i < NShards; i++ {
 		gid := config.Shards[i]
 		if _, exist := config.Groups[gid]; !exist {
-			left = append(left, gid)
+			left = append(left, i)
 		} else {
 			groups[gid] = append(groups[gid], i)
 		}
