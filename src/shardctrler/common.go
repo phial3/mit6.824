@@ -42,19 +42,101 @@ func (config *Config) Clone() *Config {
 	return &Config{config.Num, shards, groups}
 }
 
-//一致性哈希应该是最优解，这里先采用最粗暴的取模的方式
-func (config *Config) Balance() {
-	gids := make([]int, len(config.Groups))
-	idx := 0
-	for gid := range config.Groups {
-		gids[idx] = gid
-		idx++
+//一致性哈希，只是这里的slot只有10
+//然而一致性哈希其实不满足需求，本文要求的是尽可能地平均，并且移动最少。由于分片数是确定的，因此我们实际上有更好的做法
+func (config *Config) ConsistentHashBalance() {
+	if len(config.Groups) == 0 {
+		return
 	}
-	//需要根据gid做一次排序，不然不同机器可能会得到不同的结果
-	sort.Ints(gids)
-	if len(config.Groups) > 0 {
-		for i := 0; i < NShards; i++ {
-			config.Shards[i] = gids[i%len(config.Groups)]
+	//对group做一次hash
+	mp := make(map[int]int)
+	for gid := range config.Groups {
+		mp[gid%NShards] = gid
+	}
+	for i := 0; i < NShards; i++ {
+		//找到右边的第一个group
+		for j := 0; j < NShards; j++ {
+			slot := (i + j) % NShards
+			if gid, exist := mp[slot]; exist {
+				config.Shards[i] = gid
+				break
+			}
+		}
+	}
+}
+
+type Group struct {
+	Gid    int
+	Shards []int
+}
+
+func (config *Config) Balance() {
+	size := len(config.Groups)
+	if size == 0 {
+		return
+	}
+	//计算每个分组更新后的分配的分片数量
+	avg := NShards / size
+	mod := NShards % size
+	cnt := make([]int, size)
+	for i := 0; i < size; i++ {
+		cnt[i] = avg
+		if mod > 0 {
+			cnt[i]++
+			mod--
+		}
+	}
+	//key-gid,value-分片ID
+	groups := make(map[int][]int)
+	for gid := range config.Groups {
+		groups[gid] = make([]int, 0)
+	}
+	//统计被删除的后需要重新分配的分片
+	left := make([]int, 0)
+	for i := 0; i < NShards; i++ {
+		gid := config.Shards[i]
+		if _, exist := config.Groups[gid]; !exist {
+			left = append(left, gid)
+		} else {
+			groups[gid] = append(groups[gid], i)
+		}
+	}
+	//为了确保不同副本的结果固定，需要做一次排序
+	groupList := make([]Group, len(groups))
+	idx := 0
+	for gid := range groups {
+		groupList[idx] = Group{gid, groups[gid]}
+	}
+	sort.Slice(groupList, func(i, j int) bool {
+		l1 := len(groupList[i].Shards)
+		l2 := len(groupList[j].Shards)
+		//分片大的排在前面
+		if l1 != l2 {
+			return l1 > l2
+		}
+		return groupList[i].Gid < groupList[j].Gid
+	})
+	//多退少补
+	for i := 0; i < len(groups); i++ {
+		group := groupList[i]
+		c := cnt[i]
+		if len(group.Shards) == c {
+			continue
+		} else if len(group.Shards) > c {
+			remove := len(group.Shards) - c
+			//删除
+			left = append(left, group.Shards[0:remove]...)
+			group.Shards = group.Shards[remove:]
+		} else {
+			add := c - len(group.Shards)
+			group.Shards = append(group.Shards, left[0:add]...)
+			left = left[add:]
+		}
+	}
+	//修改结果
+	for _, group := range groupList {
+		for _, shard := range group.Shards {
+			config.Shards[shard] = group.Gid
 		}
 	}
 }
