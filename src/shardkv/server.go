@@ -2,9 +2,11 @@ package shardkv
 
 import (
 	"6.824/labrpc"
+	"6.824/shardctrler"
 	"bytes"
 	"log"
 	"sync/atomic"
+	"time"
 )
 import "6.824/raft"
 import "sync"
@@ -58,7 +60,9 @@ type ShardKV struct {
 
 	// Your definitions here.
 	// Your definitions here.
-	dead int32 // set by Kill()
+	sm     *shardctrler.Clerk
+	config *shardctrler.Config
+	dead   int32 // set by Kill()
 	//这里相当于论文定义的state machine,更新data必须保证单线程
 	data map[string]string
 	//更新到状态机的最后的log，这里的定义跟raft的lastApply有些许不一样，这里的lastApply是真正写入状态机的下标
@@ -99,9 +103,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	}()
 	//read log
 	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId, 0}
-	commitReply := kv.appendToRaft(&op)
-	if commitReply.WrongLeader {
-		reply.Err = ErrWrongLeader
+	err := kv.appendToRaft(&op)
+	reply.Err = err
+	if err != OK {
 		return
 	}
 	kv.mu.Lock()
@@ -125,25 +129,28 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("PutAppend request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
 	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId, 0}
-	commitReply := kv.appendToRaft(&op)
-	reply.Err = OK
-	if commitReply.WrongLeader {
-		reply.Err = ErrWrongLeader
-	}
+	err := kv.appendToRaft(&op)
+	reply.Err = err
 }
 
 //构建log并提交到raft
-func (kv *ShardKV) appendToRaft(op *Op) *CommitReply {
+func (kv *ShardKV) appendToRaft(op *Op) Err {
 	kv.mu.Lock()
-	//defer kv.mu.Unlock()
+	//分区判断
+	shard := key2shard(op.Key)
+	gid := kv.config.Shards[shard]
+	if kv.gid != gid {
+		kv.mu.Unlock()
+		return ErrWrongGroup
+	}
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		kv.mu.Unlock()
-		return &CommitReply{true}
+		return ErrWrongLeader
 	}
 	logIdx, _, success := kv.rf.Start(*op)
 	if !success {
 		kv.mu.Unlock()
-		return &CommitReply{true}
+		return ErrWrongLeader
 	}
 	DPrintf("append to raft...peerId:%d,command:%+v,logIdx:%d", kv.me, op, logIdx)
 	//等待过半数提交
@@ -151,10 +158,11 @@ func (kv *ShardKV) appendToRaft(op *Op) *CommitReply {
 	kv.replyChan[logIdx] = ch
 	kv.mu.Unlock()
 	reply := <-ch
-	//kv.mu.Lock()
-	//删除key，释放空间
-	//delete(kv.replyChan, logIdx)
-	return reply
+	if reply.WrongLeader {
+		return ErrWrongLeader
+	} else {
+		return OK
+	}
 }
 
 //
@@ -218,7 +226,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	// Use something like this to talk to the shardctrler:
 	// kv.mck = shardctrler.MakeClerk(kv.ctrlers)
-
+	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
@@ -230,6 +238,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	snapshot := kv.rf.GetPersister().ReadSnapshot()
 	kv.readPersist(snapshot)
 	go kv.applyEntry()
+	//定时加载controller配置
+	go kv.loadConfig()
 	return kv
 }
 
@@ -328,6 +338,16 @@ func (kv *ShardKV) applyEntry() {
 			}
 		}
 		handleMsg(&msg)
+	}
+}
+
+func (kv *ShardKV) loadConfig() {
+	for !kv.killed() {
+		config := kv.sm.Query(-1)
+		kv.mu.Lock()
+		kv.config = &config
+		kv.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
