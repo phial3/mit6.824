@@ -344,10 +344,32 @@ func (kv *ShardKV) applyEntry() {
 func (kv *ShardKV) loadConfig() {
 	for !kv.killed() {
 		config := kv.sm.Query(-1)
-		kv.mu.Lock()
-		kv.config = &config
-		kv.mu.Unlock()
+		if config.Num != kv.config.Num {
+			kv.mu.Lock()
+			//判断变更的shard
+			shardAdd := make([]int, 0)
+			for shard, gid := range config.Shards {
+				if gid == kv.me && kv.config.Shards[shard] != gid {
+					shardAdd = append(shardAdd, shard)
+				}
+			}
+			if len(shardAdd) > 0 {
+				//TODO:拉取分片数据
+			} else {
+				kv.config = &config
+			}
+			kv.mu.Unlock()
+		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+//拉取分区数据
+func (kv *ShardKV) pullShardData(shard int, gid int) {
+	servers := kv.config.Groups[gid]
+	for _, server := range servers {
+		client := kv.make_end(server)
+		ok := client.Call("PULL.SHARD", 1, 1)
 	}
 }
 
