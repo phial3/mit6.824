@@ -133,6 +133,16 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	reply.Err = err
 }
 
+func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
+	DPrintf("PullShard request[start]...peerId:%d,args:%+v", kv.me, args)
+	defer func() {
+		DPrintf("PullShard request[finish]...peerId:%d,reply:%+v", kv.me, reply)
+	}()
+	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId, 0}
+	err := kv.appendToRaft(&op)
+	reply.Err = err
+}
+
 //构建log并提交到raft
 func (kv *ShardKV) appendToRaft(op *Op) Err {
 	kv.mu.Lock()
