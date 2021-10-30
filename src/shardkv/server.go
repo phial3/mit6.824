@@ -60,7 +60,9 @@ type ShardKV struct {
 
 	// Your definitions here.
 	// Your definitions here.
-	sm     *shardctrler.Clerk
+	sm *shardctrler.Clerk
+	//这个配置的同步有两种做法。1.raft group的每个节点直接通过client同步最新的配置,2.只通过leader同步配置，然后通过raft log同步到其他节点
+	//只考虑使用2的方法，需要保证线性一致性(保证config生效的时序性)
 	config *shardctrler.Config
 	dead   int32 // set by Kill()
 	//这里相当于论文定义的state machine,更新data必须保证单线程
@@ -138,9 +140,7 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	defer func() {
 		DPrintf("PullShard request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
-	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId, 0}
-	err := kv.appendToRaft(&op)
-	reply.Err = err
+	//TODO:拉取分片信息
 }
 
 //构建log并提交到raft
@@ -239,6 +239,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+	kv.config = &shardctrler.Config{Num: 0, Groups: map[int][]string{}}
 
 	kv.dead = 0
 	kv.data = make(map[string]string)
@@ -265,73 +266,80 @@ func (kv *ShardKV) applyEntry() {
 				kv.mu.Unlock()
 			}()
 			if msg.CommandValid {
-				op := msg.Command.(Op)
-				switch op.Command {
-				case PutCommand:
-					//针对客户端请求的幂等处理
-					lastId := kv.getLastApplyUniqId(op.ClientId)
-					if op.UniqId > lastId {
-						//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
-						kv.data[op.Key] = op.Value
-						kv.lastApplyUniqId[op.ClientId] = op.UniqId
+				//分片配置更新
+				if config, ok := msg.Command.(shardctrler.Config); ok {
+					//更新config
+					if kv.config.Num < config.Num {
+						kv.config = &config
 					}
-				case AppendCommand:
-					//针对客户端请求的幂等处理
-					lastId := kv.getLastApplyUniqId(op.ClientId)
-					if op.UniqId > lastId {
-						//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
-						v, ok := kv.data[op.Key]
-						if !ok {
+				} else if op, ok := msg.Command.(Op); ok {
+					switch op.Command {
+					case PutCommand:
+						//针对客户端请求的幂等处理
+						lastId := kv.getLastApplyUniqId(op.ClientId)
+						if op.UniqId > lastId {
+							//DPrintf("put...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
 							kv.data[op.Key] = op.Value
-						} else {
-							kv.data[op.Key] = v + op.Value
+							kv.lastApplyUniqId[op.ClientId] = op.UniqId
 						}
-						kv.lastApplyUniqId[op.ClientId] = op.UniqId
+					case AppendCommand:
+						//针对客户端请求的幂等处理
+						lastId := kv.getLastApplyUniqId(op.ClientId)
+						if op.UniqId > lastId {
+							//DPrintf("append...peerId:%d,key:%s,values:%s", kv.me, op.Key, op.Value)
+							v, ok := kv.data[op.Key]
+							if !ok {
+								kv.data[op.Key] = op.Value
+							} else {
+								kv.data[op.Key] = v + op.Value
+							}
+							kv.lastApplyUniqId[op.ClientId] = op.UniqId
+						}
+					case GetCommand:
+					//do nothing
+					case NOOP:
+						//唤醒所有等待的线程,后面提交到raft的log都认为失败
+						if op.Leader != kv.me && len(kv.replyChan) > 0 {
+							DPrintf("唤醒等待提交的线程...peerId:%d", kv.me)
+							/*wakeup := make([]chan *CommitReply, len(kv.replyChan))
+							idx := 0
+							for _, ch := range kv.replyChan {
+								wakeup[idx] = ch
+								idx++
+							}*/
+							//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
+							for idx, ch := range kv.replyChan {
+								ch <- &CommitReply{true}
+								close(ch)
+								delete(kv.replyChan, idx)
+							}
+							/*kv.mu.Unlock()
+							for _, ch := range wakeup {
+								ch <- &CommitReply{true}
+							}*/
+							//kv.mu.Lock()
+							return
+						}
+					default:
+						panic("unknown command" + op.Command)
 					}
-				case GetCommand:
-				//do nothing
-				case NOOP:
-					//唤醒所有等待的线程,后面提交到raft的log都认为失败
-					if op.Leader != kv.me && len(kv.replyChan) > 0 {
-						DPrintf("唤醒等待提交的线程...peerId:%d", kv.me)
-						/*wakeup := make([]chan *CommitReply, len(kv.replyChan))
-						idx := 0
-						for _, ch := range kv.replyChan {
-							wakeup[idx] = ch
-							idx++
-						}*/
-						//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
-						for idx, ch := range kv.replyChan {
-							ch <- &CommitReply{true}
-							close(ch)
-							delete(kv.replyChan, idx)
+					kv.lastApply = msg.CommandIndex
+					if kv.maxraftstate > 0 {
+						if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
+							//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
+							//计算快照
+							snapshot := kv.encodeState()
+							kv.rf.Snapshot(msg.CommandIndex, snapshot)
 						}
-						/*kv.mu.Unlock()
-						for _, ch := range wakeup {
-							ch <- &CommitReply{true}
-						}*/
+					}
+					//通知所有等待线程
+					if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
+						//kv.mu.Unlock()
+						ch <- &CommitReply{false}
+						close(ch)
+						delete(kv.replyChan, msg.CommandIndex)
 						//kv.mu.Lock()
-						return
 					}
-				default:
-					panic("unknown command" + op.Command)
-				}
-				kv.lastApply = msg.CommandIndex
-				if kv.maxraftstate > 0 {
-					if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
-						//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
-						//计算快照
-						snapshot := kv.encodeState()
-						kv.rf.Snapshot(msg.CommandIndex, snapshot)
-					}
-				}
-				//通知所有等待线程
-				if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
-					//kv.mu.Unlock()
-					ch <- &CommitReply{false}
-					close(ch)
-					delete(kv.replyChan, msg.CommandIndex)
-					//kv.mu.Lock()
 				}
 			} else if msg.SnapshotValid {
 				//follower落后太多的场景需要更新快照
@@ -353,20 +361,12 @@ func (kv *ShardKV) applyEntry() {
 
 func (kv *ShardKV) loadConfig() {
 	for !kv.killed() {
-		config := kv.sm.Query(-1)
-		if config.Num != kv.config.Num {
+		if _, leader := kv.rf.GetState(); leader {
+			//直接拉最新配置，中间的配置变更跳过OK？
+			config := kv.sm.Query(-1)
 			kv.mu.Lock()
-			//判断变更的shard
-			shardAdd := make([]int, 0)
-			for shard, gid := range config.Shards {
-				if gid == kv.me && kv.config.Shards[shard] != gid {
-					shardAdd = append(shardAdd, shard)
-				}
-			}
-			if len(shardAdd) > 0 {
-				//TODO:拉取分片数据
-			} else {
-				kv.config = &config
+			if config.Num > kv.config.Num {
+				kv.rf.Start(config)
 			}
 			kv.mu.Unlock()
 		}
@@ -379,7 +379,8 @@ func (kv *ShardKV) pullShardData(shard int, gid int) {
 	servers := kv.config.Groups[gid]
 	for _, server := range servers {
 		client := kv.make_end(server)
-		ok := client.Call("PULL.SHARD", 1, 1)
+		client.Call("PULL.SHARD", 1, 1)
+		//TODO:拉取分区逻辑
 	}
 }
 
