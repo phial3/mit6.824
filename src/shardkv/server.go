@@ -48,6 +48,10 @@ type CommitReply struct {
 	WrongLeader bool
 }
 
+type DataBackup struct {
+	Data map[string]string
+}
+
 type ShardKV struct {
 	mu           sync.Mutex
 	me           int
@@ -84,6 +88,18 @@ type ShardKV struct {
 	//假设发生网络分区的场景，长时间都提交不了是否会有问题？
 	//假设刚提交的log被新选举的leader抹除和覆盖，如何唤醒正在等待的提交的线程
 	replyChan map[int]chan *CommitReply
+
+	//需要拉去的分区,key-分片ID,value-servers
+	comeInShards map[int][]string
+	//分片的backup，当你不再维护这个分片，需要把这个分片的数据备份起来给其他group进行拉取
+	//If one of your RPC handlers includes in its reply a map (e.g. a key/value map) that's part of your server's state,
+	//you may get bugs due to races. The RPC system has to read the map in order to send it to the caller,
+	//but it isn't holding a lock that covers the map. Your server, however, may proceed to modify the same map while the RPC system is reading it.
+	//The solution is for the RPC handler to include a copy of the map in the reply.
+	//key-configNum,shard
+	outShards map[int]map[int]DataBackup
+	//判断那些分片能正常提供服务
+	validShards map[int]bool
 }
 
 func (kv *ShardKV) getLastApplyUniqId(clientId int) int64 {
@@ -148,8 +164,7 @@ func (kv *ShardKV) appendToRaft(op *Op) Err {
 	kv.mu.Lock()
 	//分区判断
 	shard := key2shard(op.Key)
-	gid := kv.config.Shards[shard]
-	if kv.gid != gid {
+	if valid, exist := kv.validShards[shard]; !exist || !valid {
 		kv.mu.Unlock()
 		return ErrWrongGroup
 	}
@@ -251,7 +266,9 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.readPersist(snapshot)
 	go kv.applyEntry()
 	//定时加载controller配置
-	go kv.loadConfig()
+	go kv.loadConfigLoop()
+	//定时拉取分片数据
+	go kv.pullShardLoop()
 	return kv
 }
 
@@ -360,28 +377,61 @@ func (kv *ShardKV) applyEntry() {
 	}
 }
 
-func (kv *ShardKV) loadConfig() {
+func (kv *ShardKV) loadConfigLoop() {
 	for !kv.killed() {
-		if _, leader := kv.rf.GetState(); leader {
-			//直接拉最新配置，中间的配置变更跳过OK？
-			config := kv.sm.Query(-1)
+		loadConfig := func() {
 			kv.mu.Lock()
-			if config.Num > kv.config.Num {
+			defer kv.mu.Unlock()
+			//上一次的分片还没同步完，需要继续同步
+			if _, leader := kv.rf.GetState(); !leader || len(kv.comeInShards) > 0 {
+				return
+			}
+			//直接拉最新配置，中间的配置变更跳过OK？
+			//需要一个个版本拉取，因为我们需要对每次配置变更后不属于我们的shard都进行backup(为了让其他group过来拉)
+			//如果跳过某些版本，过来拉取的group就获取不到对应的shard
+			cur := kv.config.Num
+			kv.mu.Unlock()
+			config := kv.sm.Query(cur + 1)
+			kv.mu.Lock()
+			if config.Num != cur {
 				kv.rf.Start(config)
 			}
-			kv.mu.Unlock()
 		}
+		loadConfig()
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-//拉取分区数据
-func (kv *ShardKV) pullShardData(shard int, gid int) {
-	servers := kv.config.Groups[gid]
-	for _, server := range servers {
-		client := kv.make_end(server)
-		client.Call("PULL.SHARD", 1, 1)
-		//TODO:拉取分区逻辑
+//定时拉取分片数据
+func (kv *ShardKV) pullShardLoop() {
+	for !kv.killed() {
+		pullShard := func() {
+			kv.mu.Lock()
+			defer kv.mu.Unlock()
+			if len(kv.comeInShards) == 0 {
+				return
+			}
+			var wg sync.WaitGroup
+			for shard, servers := range kv.comeInShards {
+				wg.Add(1)
+				//注意这里一定是拿上一个版本的backup
+				go func(shard int, configNum int, servers []string) {
+					for _, server := range servers {
+						client := kv.make_end(server)
+						args := &PullShardArgs{}
+						reply := &PullShardReply{}
+						if ok := client.Call("PULL.SHARD", args, reply); ok {
+							if ok && reply.Err == OK {
+								//TODO:更新本地配置
+								break
+							}
+						}
+					}
+				}(shard, kv.config.Num-1, servers)
+			}
+		}
+		pullShard()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
