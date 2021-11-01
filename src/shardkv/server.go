@@ -153,10 +153,19 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	DPrintf("PullShard request[start]...peerId:%d,args:%+v", kv.me, args)
+	kv.mu.Lock()
 	defer func() {
+		kv.mu.Unlock()
 		DPrintf("PullShard request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
-	//TODO:拉取分片信息
+	if args.ConfigNum > kv.config.Num {
+		reply.Err = ConfigOutDate
+		return
+	}
+	backup := kv.outShards[args.ConfigNum][args.Shard]
+	reply.Err = OK
+	reply.Shard = args.Shard
+	reply.data = backup.Data
 }
 
 //构建log并提交到raft
@@ -286,10 +295,37 @@ func (kv *ShardKV) applyEntry() {
 			if msg.CommandValid {
 				//分片配置更新
 				if config, ok := msg.Command.(shardctrler.Config); ok {
-					//更新config
-					if kv.config.Num < config.Num {
+					if config.Num > kv.config.Num {
+						for shard, gid := range config.Shards {
+							curGid := kv.config.Shards[shard]
+							if curGid == gid {
+								//not change
+								continue
+							} else if curGid == kv.gid {
+								//分片删除
+								kv.validShards[shard] = false
+								backup := DataBackup{make(map[string]string)}
+								for _, key := range kv.data {
+									if key2shard(key) == shard {
+										backup.Data[key] = kv.data[key]
+										delete(kv.data, key)
+									}
+								}
+								kv.outShards[kv.config.Num][shard] = backup
+							} else if gid == kv.me {
+								//分片增加
+								kv.comeInShards[shard] = config.Groups[gid]
+							}
+						}
+						//更新config
 						kv.config = &config
 					}
+				} else if reply, ok := msg.Command.(PullShardReply); ok {
+					for _, key := range reply.data {
+						kv.data[key] = reply.data[key]
+					}
+					delete(kv.comeInShards, reply.Shard)
+					kv.validShards[reply.Shard] = true
 				} else if op, ok := msg.Command.(Op); ok {
 					switch op.Command {
 					case PutCommand:
@@ -407,8 +443,8 @@ func (kv *ShardKV) pullShardLoop() {
 	for !kv.killed() {
 		pullShard := func() {
 			kv.mu.Lock()
-			defer kv.mu.Unlock()
 			if len(kv.comeInShards) == 0 {
+				kv.mu.Unlock()
 				return
 			}
 			var wg sync.WaitGroup
@@ -416,19 +452,30 @@ func (kv *ShardKV) pullShardLoop() {
 				wg.Add(1)
 				//注意这里一定是拿上一个版本的backup
 				go func(shard int, configNum int, servers []string) {
+					defer wg.Done()
 					for _, server := range servers {
 						client := kv.make_end(server)
-						args := &PullShardArgs{}
-						reply := &PullShardReply{}
-						if ok := client.Call("PULL.SHARD", args, reply); ok {
+						args := PullShardArgs{shard, configNum}
+						reply := PullShardReply{}
+						if ok := client.Call("PULL.SHARD", &args, &reply); ok {
 							if ok && reply.Err == OK {
-								//TODO:更新本地配置
+								//更新本地配置，这里不能直接更新，需要提交到raft来保证所有节点都能够同步到
+								kv.mu.Lock()
+								kv.rf.Start(reply)
+								/*for _, key := range reply.data {
+									kv.data[key] = reply.data[key]
+								}
+								delete(kv.comeInShards, shard)
+								kv.validShards[shard] = true*/
+								kv.mu.Unlock()
 								break
 							}
 						}
 					}
 				}(shard, kv.config.Num-1, servers)
 			}
+			kv.mu.Unlock()
+			wg.Wait()
 		}
 		pullShard()
 		time.Sleep(100 * time.Millisecond)
