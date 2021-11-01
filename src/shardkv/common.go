@@ -56,5 +56,5 @@ type PullShardArgs struct {
 type PullShardReply struct {
 	Err   Err
 	Shard int
-	data  map[string]string
+	Data  map[string]string
 }

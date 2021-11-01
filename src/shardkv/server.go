@@ -99,7 +99,7 @@ type ShardKV struct {
 	//key-configNum,shard
 	outShards map[int]map[int]DataBackup
 	//判断那些分片能正常提供服务
-	validShards map[int]bool
+	validShards [shardctrler.NShards]bool
 }
 
 func (kv *ShardKV) getLastApplyUniqId(clientId int) int64 {
@@ -165,7 +165,7 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	backup := kv.outShards[args.ConfigNum][args.Shard]
 	reply.Err = OK
 	reply.Shard = args.Shard
-	reply.data = backup.Data
+	reply.Data = backup.Data
 }
 
 //构建log并提交到raft
@@ -173,7 +173,7 @@ func (kv *ShardKV) appendToRaft(op *Op) Err {
 	kv.mu.Lock()
 	//分区判断
 	shard := key2shard(op.Key)
-	if valid, exist := kv.validShards[shard]; !exist || !valid {
+	if valid := kv.validShards[shard]; !valid {
 		kv.mu.Unlock()
 		return ErrWrongGroup
 	}
@@ -249,6 +249,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
 	labgob.Register(shardctrler.Config{})
+	labgob.Register(PullShardArgs{})
+	labgob.Register(PullShardReply{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -271,6 +273,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.replyChan = make(map[int]chan *CommitReply)
 	kv.lastApply = 0
 	kv.lastApplyUniqId = make(map[int]int64)
+	kv.outShards = make(map[int]map[int]DataBackup)
+	kv.comeInShards = make(map[int][]string)
 	snapshot := kv.rf.GetPersister().ReadSnapshot()
 	kv.readPersist(snapshot)
 	go kv.applyEntry()
@@ -311,6 +315,9 @@ func (kv *ShardKV) applyEntry() {
 										delete(kv.data, key)
 									}
 								}
+								if _, exist := kv.outShards[kv.config.Num]; !exist {
+									kv.outShards[kv.config.Num] = make(map[int]DataBackup)
+								}
 								kv.outShards[kv.config.Num][shard] = backup
 							} else if gid == kv.me {
 								//分片增加
@@ -321,8 +328,8 @@ func (kv *ShardKV) applyEntry() {
 						kv.config = &config
 					}
 				} else if reply, ok := msg.Command.(PullShardReply); ok {
-					for _, key := range reply.data {
-						kv.data[key] = reply.data[key]
+					for _, key := range reply.Data {
+						kv.data[key] = reply.Data[key]
 					}
 					delete(kv.comeInShards, reply.Shard)
 					kv.validShards[reply.Shard] = true
