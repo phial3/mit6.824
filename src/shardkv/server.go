@@ -324,11 +324,12 @@ func (kv *ShardKV) applyEntry() {
 								}
 								kv.outShards[kv.config.Num][shard] = backup
 							} else if gid == kv.gid {
-								//分片增加
-								kv.comeInShards[shard] = config.Groups[gid]
+								//分片增加，需要从旧的group上面去拉配置
 								//0是特殊的GID，不需要备份也不需要拉取配置
 								if curGid == 0 {
 									kv.validShards[shard] = true
+								} else {
+									kv.comeInShards[shard] = kv.config.Groups[curGid]
 								}
 							}
 						}
