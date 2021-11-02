@@ -12,7 +12,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -152,11 +152,11 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
-	DPrintf("PullShard request[start]...peerId:%d,args:%+v", kv.me, args)
+	//DPrintf("PullShard request[start]...peerId:%d,gid:%d,args:%+v", kv.me, kv.gid, args)
 	kv.mu.Lock()
 	defer func() {
 		kv.mu.Unlock()
-		DPrintf("PullShard request[finish]...peerId:%d,reply:%+v", kv.me, reply)
+		//DPrintf("PullShard request[finish]...peerId:%d,gid:%d,reply:%+v", kv.me, kv.gid, reply)
 	}()
 	if args.ConfigNum >= kv.config.Num {
 		reply.Err = ConfigOutDate
@@ -337,8 +337,8 @@ func (kv *ShardKV) applyEntry() {
 						kv.config = &config
 					}
 				} else if reply, ok := msg.Command.(PullShardReply); ok {
-					for _, key := range reply.Data {
-						kv.data[key] = reply.Data[key]
+					for key, value := range reply.Data {
+						kv.data[key] = value
 					}
 					delete(kv.comeInShards, reply.Shard)
 					kv.validShards[reply.Shard] = true
@@ -475,6 +475,7 @@ func (kv *ShardKV) pullShardLoop() {
 						reply := PullShardReply{}
 						if ok := client.Call("ShardKV.PullShard", &args, &reply); ok {
 							if ok && reply.Err == OK {
+								DPrintf("PullShard success...peerId:%d,gid:%d,args:%+v,reply:%+v", kv.me, kv.gid, args, reply)
 								//更新本地配置，这里不能直接更新，需要提交到raft来保证所有节点都能够同步到
 								kv.mu.Lock()
 								kv.rf.Start(reply)
@@ -504,6 +505,12 @@ func (kv *ShardKV) encodeState() []byte {
 	encoder.Encode(kv.data)
 	encoder.Encode(kv.lastApplyUniqId)
 	encoder.Encode(kv.lastApply)
+
+	//分片相关配置
+	encoder.Encode(kv.outShards)
+	encoder.Encode(kv.config)
+	encoder.Encode(kv.comeInShards)
+	encoder.Encode(kv.validShards)
 	return w.Bytes()
 }
 
@@ -517,7 +524,9 @@ func (kv *ShardKV) readPersist(snapshot []byte) {
 	r := bytes.NewBuffer(snapshot)
 	decoder := labgob.NewDecoder(r)
 	if decoder.Decode(&kv.data) != nil ||
-		decoder.Decode(&kv.lastApplyUniqId) != nil || decoder.Decode(&kv.lastApply) != nil {
+		decoder.Decode(&kv.lastApplyUniqId) != nil || decoder.Decode(&kv.lastApply) != nil ||
+		decoder.Decode(&kv.outShards) != nil || decoder.Decode(&kv.config) != nil ||
+		decoder.Decode(&kv.comeInShards) != nil || decoder.Decode(&kv.validShards) != nil {
 		DPrintf("read persist fail...peerId:%d", kv.me)
 	} else {
 		DPrintf("read persist success...peerId:%d\n", kv.me)
