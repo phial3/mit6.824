@@ -1,6 +1,8 @@
 package shardkv
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -24,6 +26,8 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 // test static 2-way sharding, without shard movement.
 //
 func TestStaticShards(t *testing.T) {
+	//debugger := util.Debugger{}
+	//debugger.StartHTTPDebugger()
 	fmt.Printf("Test: static shards ...\n")
 
 	cfg := make_config(t, 3, false, -1)

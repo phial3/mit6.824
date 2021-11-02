@@ -12,7 +12,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -158,14 +158,19 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 		kv.mu.Unlock()
 		DPrintf("PullShard request[finish]...peerId:%d,reply:%+v", kv.me, reply)
 	}()
-	if args.ConfigNum > kv.config.Num {
+	if args.ConfigNum >= kv.config.Num {
 		reply.Err = ConfigOutDate
 		return
 	}
-	backup := kv.outShards[args.ConfigNum][args.Shard]
+	//初始配置特殊处理
 	reply.Err = OK
 	reply.Shard = args.Shard
-	reply.Data = backup.Data
+	if args.ConfigNum == 0 {
+		reply.Data = make(map[string]string)
+	} else {
+		backup := kv.outShards[args.ConfigNum][args.Shard]
+		reply.Data = backup.Data
+	}
 }
 
 //构建log并提交到raft
@@ -267,7 +272,6 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.config = &shardctrler.Config{Num: 0, Groups: map[int][]string{}}
-
 	kv.dead = 0
 	kv.data = make(map[string]string)
 	kv.replyChan = make(map[int]chan *CommitReply)
@@ -299,19 +303,19 @@ func (kv *ShardKV) applyEntry() {
 			if msg.CommandValid {
 				//分片配置更新
 				if config, ok := msg.Command.(shardctrler.Config); ok {
+					DPrintf("配置更新...peerId:%d,gid:%d,config:%+v", kv.me, kv.gid, config)
 					if config.Num > kv.config.Num {
 						for shard, gid := range config.Shards {
 							curGid := kv.config.Shards[shard]
 							if curGid == gid {
-								//not change
 								continue
 							} else if curGid == kv.gid {
 								//分片删除
 								kv.validShards[shard] = false
 								backup := DataBackup{make(map[string]string)}
-								for _, key := range kv.data {
+								for key, value := range kv.data {
 									if key2shard(key) == shard {
-										backup.Data[key] = kv.data[key]
+										backup.Data[key] = value
 										delete(kv.data, key)
 									}
 								}
@@ -319,9 +323,13 @@ func (kv *ShardKV) applyEntry() {
 									kv.outShards[kv.config.Num] = make(map[int]DataBackup)
 								}
 								kv.outShards[kv.config.Num][shard] = backup
-							} else if gid == kv.me {
+							} else if gid == kv.gid {
 								//分片增加
 								kv.comeInShards[shard] = config.Groups[gid]
+								//0是特殊的GID，不需要备份也不需要拉取配置
+								if curGid == 0 {
+									kv.validShards[shard] = true
+								}
 							}
 						}
 						//更新config
@@ -436,7 +444,7 @@ func (kv *ShardKV) loadConfigLoop() {
 			kv.mu.Unlock()
 			config := kv.sm.Query(cur + 1)
 			kv.mu.Lock()
-			if config.Num != cur {
+			if config.Num > cur {
 				kv.rf.Start(config)
 			}
 		}
@@ -464,7 +472,7 @@ func (kv *ShardKV) pullShardLoop() {
 						client := kv.make_end(server)
 						args := PullShardArgs{shard, configNum}
 						reply := PullShardReply{}
-						if ok := client.Call("PULL.SHARD", &args, &reply); ok {
+						if ok := client.Call("ShardKV.PullShard", &args, &reply); ok {
 							if ok && reply.Err == OK {
 								//更新本地配置，这里不能直接更新，需要提交到raft来保证所有节点都能够同步到
 								kv.mu.Lock()
