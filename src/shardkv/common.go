@@ -14,6 +14,7 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
+	ConfigOutDate  = "ConfigOutDate"
 )
 
 type Err string
@@ -48,10 +49,14 @@ type GetReply struct {
 }
 
 type PullShardArgs struct {
-	Shard int
+	Shard     int
+	ConfigNum int
 }
 
 type PullShardReply struct {
-	Err Err
-	data map[string]string
+	Err   Err
+	Shard int
+	Data  map[string]string
+	//幂等需要
+	LastApplyUniqId map[int]int64
 }
