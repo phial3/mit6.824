@@ -57,4 +57,6 @@ type PullShardReply struct {
 	Err   Err
 	Shard int
 	Data  map[string]string
+	//幂等需要
+	LastApplyUniqId map[int]int64
 }

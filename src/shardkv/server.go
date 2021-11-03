@@ -170,6 +170,10 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	} else {
 		backup := kv.outShards[args.ConfigNum][args.Shard]
 		reply.Data = backup.Data
+		reply.LastApplyUniqId = make(map[int]int64)
+		for cid, uniqId := range kv.lastApplyUniqId {
+			reply.LastApplyUniqId[cid] = uniqId
+		}
 	}
 }
 
@@ -338,6 +342,12 @@ func (kv *ShardKV) applyEntry() {
 					}
 					delete(kv.comeInShards, reply.Shard)
 					kv.validShards[reply.Shard] = true
+					//幂等ID更新
+					for cid, uniqId := range reply.LastApplyUniqId {
+						if id, exist := kv.lastApplyUniqId[cid]; !exist || id < uniqId {
+							kv.lastApplyUniqId[cid] = uniqId
+						}
+					}
 				} else if op, ok := msg.Command.(Op); ok {
 					//最终的校验只能放这里，并发场景下只能由这一层来保证已经迁移走的shard不会被写入
 					shard := key2shard(op.Key)
