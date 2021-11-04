@@ -29,8 +29,9 @@ type ShardCtrler struct {
 	//等待raft提交，这里有一个问题，
 	//假设发生网络分区的场景，长时间都提交不了是否会有问题？
 	//假设刚提交的log被新选举的leader抹除和覆盖，如何唤醒正在等待的提交的线程
-	replyChan map[int]chan *CommitReply
-	dead      int32 // set by Kill()
+	replyChan       map[int]chan *CommitReply
+	dead            int32 // set by Kill()
+	lastApplyUniqId map[int]int64
 }
 
 //表示当前的commit log是否由新的leader产生
@@ -178,8 +179,17 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	// Your code here.
 	sc.dead = 0
 	sc.replyChan = make(map[int]chan *CommitReply)
+	sc.lastApplyUniqId = make(map[int]int64)
 	go sc.applyEntry()
 	return sc
+}
+
+func (sc *ShardCtrler) getLastApplyUniqId(clientId int) int64 {
+	_, ok := sc.lastApplyUniqId[clientId]
+	if !ok {
+		sc.lastApplyUniqId[clientId] = -1
+	}
+	return sc.lastApplyUniqId[clientId]
 }
 
 //更新状态机数据，需要保证时序，这里只能使用单线程
@@ -197,33 +207,45 @@ func (sc *ShardCtrler) applyEntry() {
 				switch op.CmdType {
 				case JoinCommand:
 					args := op.Args.(JoinArgs)
-					last := sc.configs[len(sc.configs)-1]
-					new := last.Clone()
-					new.Num = len(sc.configs)
-					for gid, servers := range args.Servers {
-						new.Groups[gid] = servers
+					lastId := sc.getLastApplyUniqId(args.ClientId)
+					if args.UniqId > lastId {
+						last := sc.configs[len(sc.configs)-1]
+						new := last.Clone()
+						new.Num = len(sc.configs)
+						for gid, servers := range args.Servers {
+							new.Groups[gid] = servers
+						}
+						//重新分配
+						new.Balance()
+						sc.configs = append(sc.configs, *new)
+						sc.lastApplyUniqId[args.ClientId] = args.UniqId
 					}
-					//重新分配
-					new.Balance()
-					sc.configs = append(sc.configs, *new)
 				case LeaveCommand:
 					args := op.Args.(LeaveArgs)
-					last := sc.configs[len(sc.configs)-1]
-					new := last.Clone()
-					new.Num = len(sc.configs)
-					for _, gid := range args.GIDs {
-						delete(new.Groups, gid)
+					lastId := sc.getLastApplyUniqId(args.ClientId)
+					if args.UniqId > lastId {
+						last := sc.configs[len(sc.configs)-1]
+						new := last.Clone()
+						new.Num = len(sc.configs)
+						for _, gid := range args.GIDs {
+							delete(new.Groups, gid)
+						}
+						//重新分配
+						new.Balance()
+						sc.configs = append(sc.configs, *new)
+						sc.lastApplyUniqId[args.ClientId] = args.UniqId
 					}
-					//重新分配
-					new.Balance()
-					sc.configs = append(sc.configs, *new)
 				case MoveCommand:
 					args := op.Args.(MoveArgs)
-					last := sc.configs[len(sc.configs)-1]
-					new := last.Clone()
-					new.Num = len(sc.configs)
-					new.Shards[args.Shard] = args.GID
-					sc.configs = append(sc.configs, *new)
+					lastId := sc.getLastApplyUniqId(args.ClientId)
+					if args.UniqId > lastId {
+						last := sc.configs[len(sc.configs)-1]
+						new := last.Clone()
+						new.Num = len(sc.configs)
+						new.Shards[args.Shard] = args.GID
+						sc.configs = append(sc.configs, *new)
+						sc.lastApplyUniqId[args.ClientId] = args.UniqId
+					}
 				case QueryCommand:
 					//do nothing
 				case NOOP:
