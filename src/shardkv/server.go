@@ -409,20 +409,21 @@ func (kv *ShardKV) applyEntry() {
 							panic("unknown command" + op.Command)
 						}
 						//kv.lastApply = msg.CommandIndex
-						if kv.maxraftstate > 0 {
-							if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
-								//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
-								//计算快照
-								snapshot := kv.encodeState()
-								kv.rf.Snapshot(msg.CommandIndex, snapshot)
-							}
-						}
 						//通知等待线程
 						if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
 							ch <- &CommitReply{OK}
 							close(ch)
 							delete(kv.replyChan, msg.CommandIndex)
 						}
+					}
+				}
+				//快照备份
+				if kv.maxraftstate > 0 {
+					if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
+						//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
+						//计算快照
+						snapshot := kv.encodeState()
+						kv.rf.Snapshot(msg.CommandIndex, snapshot)
 					}
 				}
 			} else if msg.SnapshotValid {
