@@ -338,7 +338,7 @@ func (kv *ShardKV) applyEntry() {
 					}
 				} else if reply, ok := msg.Command.(PullShardReply); ok {
 					//这里也要考虑幂等的场景，有可能拉取配置的时候超时，导致提交了两次
-					if !kv.validShards[reply.Shard] {
+					if _, exist := kv.comeInShards[reply.Shard]; exist {
 						for key, value := range reply.Data {
 							kv.data[key] = value
 						}
