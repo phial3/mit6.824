@@ -337,15 +337,18 @@ func (kv *ShardKV) applyEntry() {
 						kv.config = &config
 					}
 				} else if reply, ok := msg.Command.(PullShardReply); ok {
-					for key, value := range reply.Data {
-						kv.data[key] = value
-					}
-					delete(kv.comeInShards, reply.Shard)
-					kv.validShards[reply.Shard] = true
-					//幂等ID更新
-					for cid, uniqId := range reply.LastApplyUniqId {
-						if id, exist := kv.lastApplyUniqId[cid]; !exist || id < uniqId {
-							kv.lastApplyUniqId[cid] = uniqId
+					//这里也要考虑幂等的场景，有可能拉取配置的时候超时，导致提交了两次
+					if _, exist := kv.comeInShards[reply.Shard]; exist {
+						for key, value := range reply.Data {
+							kv.data[key] = value
+						}
+						delete(kv.comeInShards, reply.Shard)
+						kv.validShards[reply.Shard] = true
+						//幂等ID更新
+						for cid, uniqId := range reply.LastApplyUniqId {
+							if id, exist := kv.lastApplyUniqId[cid]; !exist || id < uniqId {
+								kv.lastApplyUniqId[cid] = uniqId
+							}
 						}
 					}
 				} else if op, ok := msg.Command.(Op); ok {
@@ -420,7 +423,7 @@ func (kv *ShardKV) applyEntry() {
 				//快照备份
 				if kv.maxraftstate > 0 {
 					if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
-						//fmt.Printf("开始生成快照...peerId:%d\n", kv.me)
+						DPrintf("开始生成快照...peerId:%d,gid:%d,commandIdx:%d\n", kv.me, kv.gid, msg.CommandIndex)
 						//计算快照
 						snapshot := kv.encodeState()
 						kv.rf.Snapshot(msg.CommandIndex, snapshot)
@@ -474,7 +477,8 @@ func (kv *ShardKV) pullShardLoop() {
 	for !kv.killed() {
 		pullShard := func() {
 			kv.mu.Lock()
-			if len(kv.comeInShards) == 0 {
+
+			if _, leader := kv.rf.GetState(); !leader || len(kv.comeInShards) == 0 {
 				kv.mu.Unlock()
 				return
 			}
