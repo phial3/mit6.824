@@ -293,7 +293,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 func (kv *ShardKV) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
+		DPrintf("log commit...peerId:%d,gid:%d,msg:%+v,logIdx:%d", kv.me, kv.gid, msg, msg.CommandIndex)
 		handleMsg := func(msg *raft.ApplyMsg) {
 			kv.mu.Lock()
 			//fmt.Printf("apply entry[start]...peerId:%d,msg:%+v,logIdx:%d\n", kv.me, msg, msg.CommandIndex)
@@ -354,7 +354,7 @@ func (kv *ShardKV) applyEntry() {
 				} else if op, ok := msg.Command.(Op); ok {
 					//最终的校验只能放这里，并发场景下只能由这一层来保证已经迁移走的shard不会被写入
 					shard := key2shard(op.Key)
-					if !kv.validShards[shard] {
+					if op.Command != NOOP && !kv.validShards[shard] {
 						if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
 							ch <- &CommitReply{ErrWrongGroup}
 							close(ch)
