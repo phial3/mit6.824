@@ -12,7 +12,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -117,7 +117,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	DPrintf("Get request[start]...peerId:%d,args:%+v", kv.me, args)
 	defer func() {
-		DPrintf("Get request[finish]...peerId:%d,reply:%+v", kv.me, reply)
+		DPrintf("Get request[finish]...peerId:%d,args:%+v,reply:%+v", kv.me, args, reply)
 	}()
 	//read log
 	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId, 0}
@@ -144,7 +144,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	DPrintf("PutAppend request[start]...peerId:%d,gid:%d,args:%+v", kv.me, kv.gid, args)
 	defer func() {
-		DPrintf("PutAppend request[finish]...peerId:%d,gid:%d,reply:%+v", kv.me, kv.gid, reply)
+		DPrintf("PutAppend request[finish]...peerId:%d,gid:%d,args:%+v,reply:%+v", kv.me, kv.gid, args, reply)
 	}()
 	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId, 0}
 	err := kv.appendToRaft(&op)
@@ -388,25 +388,12 @@ func (kv *ShardKV) applyEntry() {
 						case NOOP:
 							//唤醒所有等待的线程,后面提交到raft的log都认为失败
 							if op.Leader != kv.me && len(kv.replyChan) > 0 {
-								DPrintf("唤醒等待提交的线程...peerId:%d", kv.me)
-								/*wakeup := make([]chan *CommitReply, len(kv.replyChan))
-								idx := 0
-								for _, ch := range kv.replyChan {
-									wakeup[idx] = ch
-									idx++
-								}*/
-								//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
 								for idx, ch := range kv.replyChan {
+									DPrintf("NOOP唤醒等待提交的线程...peerId:%d,gid:%d,logId:%d", kv.me, kv.gid, idx)
 									ch <- &CommitReply{ErrWrongLeader}
 									close(ch)
 									delete(kv.replyChan, idx)
 								}
-								/*kv.mu.Unlock()
-								for _, ch := range wakeup {
-									ch <- &CommitReply{true}
-								}*/
-								//kv.mu.Lock()
-								return
 							}
 						default:
 							panic("unknown command" + op.Command)
