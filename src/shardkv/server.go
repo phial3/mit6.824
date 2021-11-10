@@ -12,7 +12,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -165,11 +165,12 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	//初始配置特殊处理
 	reply.Err = OK
 	reply.Shard = args.Shard
-	if args.ConfigNum == 0 {
-		reply.Data = make(map[string]string)
-	} else {
+	reply.Data = make(map[string]string)
+	if args.ConfigNum > 0 {
 		backup := kv.outShards[args.ConfigNum][args.Shard]
-		reply.Data = backup.Data
+		for k, v := range backup.Data {
+			reply.Data[k] = v
+		}
 		reply.LastApplyUniqId = make(map[int]int64)
 		for cid, uniqId := range kv.lastApplyUniqId {
 			reply.LastApplyUniqId[cid] = uniqId
