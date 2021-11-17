@@ -2,6 +2,7 @@ package shardkv
 
 import (
 	"6.824/porcupine"
+	"6.824/shardctrler"
 )
 import "6.824/models"
 import "testing"
@@ -455,6 +456,16 @@ func TestConcurrent2(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+}
+
+func TestShard(t *testing.T) {
+	key := "3"
+	shard := 0
+	if len(key) > 0 {
+		shard = int(key[0])
+	}
+	shard %= shardctrler.NShards
+	fmt.Printf("%d",shard)
 }
 
 func TestConcurrent3(t *testing.T) {

@@ -12,7 +12,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -165,13 +165,15 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	//初始配置特殊处理
 	reply.Err = OK
 	reply.Shard = args.Shard
+	reply.ConfigNum = args.ConfigNum
 	reply.Data = make(map[string]string)
+	reply.LastApplyUniqId = make(map[int]int64)
 	if args.ConfigNum > 0 {
 		backup := kv.outShards[args.ConfigNum][args.Shard]
 		for k, v := range backup.Data {
 			reply.Data[k] = v
 		}
-		reply.LastApplyUniqId = make(map[int]int64)
+		//reply.LastApplyUniqId = make(map[int]int64)
 		for cid, uniqId := range kv.lastApplyUniqId {
 			reply.LastApplyUniqId[cid] = uniqId
 		}
@@ -339,7 +341,10 @@ func (kv *ShardKV) applyEntry() {
 					}
 				} else if reply, ok := msg.Command.(PullShardReply); ok {
 					//这里也要考虑幂等的场景，有可能拉取配置的时候超时，导致提交了两次
-					if _, exist := kv.comeInShards[reply.Shard]; exist {
+					if _, exist := kv.comeInShards[reply.Shard]; !exist {
+						DPrintf("load shard[fail]..."+
+							"peerId:%d,gid:%d,reply.Shard:%d,logIdx:%d,reply:%+v", kv.me, kv.gid, reply.Shard, msg.CommandIndex, reply)
+					} else {
 						for key, value := range reply.Data {
 							kv.data[key] = value
 						}
@@ -351,6 +356,8 @@ func (kv *ShardKV) applyEntry() {
 								kv.lastApplyUniqId[cid] = uniqId
 							}
 						}
+						DPrintf("load shard[success]..."+
+							"peerId:%d,gid:%d,reply.Shard:%d,logIdx:%d,reply:%+v", kv.me, kv.gid, reply.Shard, msg.CommandIndex, reply)
 					}
 				} else if op, ok := msg.Command.(Op); ok {
 					//最终的校验只能放这里，并发场景下只能由这一层来保证已经迁移走的shard不会被写入

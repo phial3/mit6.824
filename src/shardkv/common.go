@@ -54,9 +54,10 @@ type PullShardArgs struct {
 }
 
 type PullShardReply struct {
-	Err   Err
-	Shard int
-	Data  map[string]string
+	Err       Err
+	Shard     int
+	ConfigNum int
+	Data      map[string]string
 	//幂等需要
 	LastApplyUniqId map[int]int64
 }
