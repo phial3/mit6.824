@@ -12,7 +12,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -72,7 +72,7 @@ type ShardKV struct {
 	//这里相当于论文定义的state machine,更新data必须保证单线程
 	data map[string]string
 	//更新到状态机的最后的log，这里的定义跟raft的lastApply有些许不一样，这里的lastApply是真正写入状态机的下标
-	//lastApply int
+	lastApply int
 	//等待提交channel，这里其实也有空间压力，正式环境肯定是需要考虑空间释放
 	//You might assume that you will never see Start() return the same index twice,
 	//or at the very least, that if you see the same index again, the command that
@@ -278,7 +278,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.dead = 0
 	kv.data = make(map[string]string)
 	kv.replyChan = make(map[int]chan *CommitReply)
-	//kv.lastApply = 0
+	kv.lastApply = 0
 	kv.lastApplyUniqId = make(map[int]int64)
 	kv.outShards = make(map[int]map[int]DataBackup)
 	kv.comeInShards = make(map[int][]string)
@@ -304,6 +304,10 @@ func (kv *ShardKV) applyEntry() {
 				kv.mu.Unlock()
 			}()
 			if msg.CommandValid {
+				//这里是由于加载了快照以前的log需要丢弃掉
+				if msg.CommandIndex <= kv.lastApply {
+					return
+				}
 				//分片配置更新
 				if config, ok := msg.Command.(shardctrler.Config); ok {
 					DPrintf("配置更新...peerId:%d,gid:%d,config:%+v", kv.me, kv.gid, config)
@@ -415,6 +419,7 @@ func (kv *ShardKV) applyEntry() {
 						}
 					}
 				}
+				kv.lastApply = msg.CommandIndex
 				//快照备份
 				if kv.maxraftstate > 0 {
 					if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
@@ -426,7 +431,7 @@ func (kv *ShardKV) applyEntry() {
 				}
 			} else if msg.SnapshotValid {
 				//follower落后太多的场景需要更新快照
-				DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
+				DPrintf("InstallSnapshot %v\n", msg.SnapshotIndex)
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
 					//kv.lastApply = msg.CommandIndex
 					//data解析
@@ -518,7 +523,7 @@ func (kv *ShardKV) encodeState() []byte {
 	encoder := labgob.NewEncoder(w)
 	encoder.Encode(kv.data)
 	encoder.Encode(kv.lastApplyUniqId)
-	//encoder.Encode(kv.lastApply)
+	encoder.Encode(kv.lastApply)
 
 	//分片相关配置
 	encoder.Encode(kv.outShards)
@@ -539,7 +544,7 @@ func (kv *ShardKV) readPersist(snapshot []byte) {
 	decoder := labgob.NewDecoder(r)
 	if decoder.Decode(&kv.data) != nil ||
 		decoder.Decode(&kv.lastApplyUniqId) != nil ||
-		//decoder.Decode(&kv.lastApply) != nil ||
+		decoder.Decode(&kv.lastApply) != nil ||
 		decoder.Decode(&kv.outShards) != nil || decoder.Decode(&kv.config) != nil ||
 		decoder.Decode(&kv.comeInShards) != nil || decoder.Decode(&kv.validShards) != nil {
 		DPrintf("read persist fail...peerId:%d", kv.me)
