@@ -304,7 +304,7 @@ func (kv *ShardKV) applyEntry() {
 				kv.mu.Unlock()
 			}()
 			if msg.CommandValid {
-				//这里是由于加载了快照以前的log需要丢弃掉
+				//这里是由于加载了快照，历史的log需要丢弃掉
 				if msg.CommandIndex <= kv.lastApply {
 					return
 				}
@@ -314,9 +314,11 @@ func (kv *ShardKV) applyEntry() {
 					if config.Num > kv.config.Num {
 						for shard, gid := range config.Shards {
 							curGid := kv.config.Shards[shard]
-							if curGid == gid {
+							//配置没有变更或者变更的配置跟当前集群没有关系
+							if curGid == gid || (curGid != kv.gid && gid != kv.gid) {
 								continue
-							} else if curGid == kv.gid {
+							}
+							if curGid == kv.gid {
 								//分片删除
 								kv.validShards[shard] = false
 								backup := DataBackup{make(map[string]string)}
@@ -431,9 +433,8 @@ func (kv *ShardKV) applyEntry() {
 				}
 			} else if msg.SnapshotValid {
 				//follower落后太多的场景需要更新快照
-				DPrintf("InstallSnapshot %v\n", msg.SnapshotIndex)
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
-					//kv.lastApply = msg.CommandIndex
+					DPrintf("InstallSnapshot peerId:%d,gid:%d,snapshotIdx:%+v\n", kv.me, kv.gid, msg.SnapshotIndex)
 					//data解析
 					kv.readPersist(msg.Snapshot)
 				}
