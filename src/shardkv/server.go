@@ -72,7 +72,7 @@ type ShardKV struct {
 	//这里相当于论文定义的state machine,更新data必须保证单线程
 	data map[string]string
 	//更新到状态机的最后的log，这里的定义跟raft的lastApply有些许不一样，这里的lastApply是真正写入状态机的下标
-	//lastApply int
+	lastApply int
 	//等待提交channel，这里其实也有空间压力，正式环境肯定是需要考虑空间释放
 	//You might assume that you will never see Start() return the same index twice,
 	//or at the very least, that if you see the same index again, the command that
@@ -117,7 +117,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	DPrintf("Get request[start]...peerId:%d,args:%+v", kv.me, args)
 	defer func() {
-		DPrintf("Get request[finish]...peerId:%d,reply:%+v", kv.me, reply)
+		DPrintf("Get request[finish]...peerId:%d,args:%+v,reply:%+v", kv.me, args, reply)
 	}()
 	//read log
 	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId, 0}
@@ -144,7 +144,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	DPrintf("PutAppend request[start]...peerId:%d,gid:%d,args:%+v", kv.me, kv.gid, args)
 	defer func() {
-		DPrintf("PutAppend request[finish]...peerId:%d,gid:%d,reply:%+v", kv.me, kv.gid, reply)
+		DPrintf("PutAppend request[finish]...peerId:%d,gid:%d,args:%+v,reply:%+v", kv.me, kv.gid, args, reply)
 	}()
 	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId, 0}
 	err := kv.appendToRaft(&op)
@@ -165,12 +165,15 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 	//初始配置特殊处理
 	reply.Err = OK
 	reply.Shard = args.Shard
-	if args.ConfigNum == 0 {
-		reply.Data = make(map[string]string)
-	} else {
+	reply.ConfigNum = args.ConfigNum
+	reply.Data = make(map[string]string)
+	reply.LastApplyUniqId = make(map[int]int64)
+	if args.ConfigNum > 0 {
 		backup := kv.outShards[args.ConfigNum][args.Shard]
-		reply.Data = backup.Data
-		reply.LastApplyUniqId = make(map[int]int64)
+		for k, v := range backup.Data {
+			reply.Data[k] = v
+		}
+		//reply.LastApplyUniqId = make(map[int]int64)
 		for cid, uniqId := range kv.lastApplyUniqId {
 			reply.LastApplyUniqId[cid] = uniqId
 		}
@@ -275,7 +278,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.dead = 0
 	kv.data = make(map[string]string)
 	kv.replyChan = make(map[int]chan *CommitReply)
-	//kv.lastApply = 0
+	kv.lastApply = 0
 	kv.lastApplyUniqId = make(map[int]int64)
 	kv.outShards = make(map[int]map[int]DataBackup)
 	kv.comeInShards = make(map[int][]string)
@@ -293,7 +296,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 func (kv *ShardKV) applyEntry() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		DPrintf("log commit...peerId:%d,msg:%+v,logIdx:%d", kv.me, msg, msg.CommandIndex)
+		DPrintf("log commit...peerId:%d,gid:%d,msg:%+v,logIdx:%d", kv.me, kv.gid, msg, msg.CommandIndex)
 		handleMsg := func(msg *raft.ApplyMsg) {
 			kv.mu.Lock()
 			//fmt.Printf("apply entry[start]...peerId:%d,msg:%+v,logIdx:%d\n", kv.me, msg, msg.CommandIndex)
@@ -301,15 +304,21 @@ func (kv *ShardKV) applyEntry() {
 				kv.mu.Unlock()
 			}()
 			if msg.CommandValid {
+				//这里是由于加载了快照，历史的log需要丢弃掉
+				if msg.CommandIndex <= kv.lastApply {
+					return
+				}
 				//分片配置更新
 				if config, ok := msg.Command.(shardctrler.Config); ok {
 					DPrintf("配置更新...peerId:%d,gid:%d,config:%+v", kv.me, kv.gid, config)
 					if config.Num > kv.config.Num {
 						for shard, gid := range config.Shards {
 							curGid := kv.config.Shards[shard]
-							if curGid == gid {
+							//配置没有变更或者变更的配置跟当前集群没有关系
+							if curGid == gid || (curGid != kv.gid && gid != kv.gid) {
 								continue
-							} else if curGid == kv.gid {
+							}
+							if curGid == kv.gid {
 								//分片删除
 								kv.validShards[shard] = false
 								backup := DataBackup{make(map[string]string)}
@@ -338,7 +347,10 @@ func (kv *ShardKV) applyEntry() {
 					}
 				} else if reply, ok := msg.Command.(PullShardReply); ok {
 					//这里也要考虑幂等的场景，有可能拉取配置的时候超时，导致提交了两次
-					if _, exist := kv.comeInShards[reply.Shard]; exist {
+					if _, exist := kv.comeInShards[reply.Shard]; !exist {
+						DPrintf("load shard[fail]..."+
+							"peerId:%d,gid:%d,reply.Shard:%d,logIdx:%d,reply:%+v", kv.me, kv.gid, reply.Shard, msg.CommandIndex, reply)
+					} else {
 						for key, value := range reply.Data {
 							kv.data[key] = value
 						}
@@ -350,11 +362,13 @@ func (kv *ShardKV) applyEntry() {
 								kv.lastApplyUniqId[cid] = uniqId
 							}
 						}
+						DPrintf("load shard[success]..."+
+							"peerId:%d,gid:%d,reply.Shard:%d,logIdx:%d,reply:%+v", kv.me, kv.gid, reply.Shard, msg.CommandIndex, reply)
 					}
 				} else if op, ok := msg.Command.(Op); ok {
 					//最终的校验只能放这里，并发场景下只能由这一层来保证已经迁移走的shard不会被写入
 					shard := key2shard(op.Key)
-					if !kv.validShards[shard] {
+					if op.Command != NOOP && !kv.validShards[shard] {
 						if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
 							ch <- &CommitReply{ErrWrongGroup}
 							close(ch)
@@ -388,25 +402,12 @@ func (kv *ShardKV) applyEntry() {
 						case NOOP:
 							//唤醒所有等待的线程,后面提交到raft的log都认为失败
 							if op.Leader != kv.me && len(kv.replyChan) > 0 {
-								DPrintf("唤醒等待提交的线程...peerId:%d", kv.me)
-								/*wakeup := make([]chan *CommitReply, len(kv.replyChan))
-								idx := 0
-								for _, ch := range kv.replyChan {
-									wakeup[idx] = ch
-									idx++
-								}*/
-								//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
 								for idx, ch := range kv.replyChan {
+									DPrintf("NOOP唤醒等待提交的线程...peerId:%d,gid:%d,logId:%d", kv.me, kv.gid, idx)
 									ch <- &CommitReply{ErrWrongLeader}
 									close(ch)
 									delete(kv.replyChan, idx)
 								}
-								/*kv.mu.Unlock()
-								for _, ch := range wakeup {
-									ch <- &CommitReply{true}
-								}*/
-								//kv.mu.Lock()
-								return
 							}
 						default:
 							panic("unknown command" + op.Command)
@@ -420,6 +421,7 @@ func (kv *ShardKV) applyEntry() {
 						}
 					}
 				}
+				kv.lastApply = msg.CommandIndex
 				//快照备份
 				if kv.maxraftstate > 0 {
 					if kv.rf.GetPersister().RaftStateSize() >= kv.maxraftstate {
@@ -431,9 +433,8 @@ func (kv *ShardKV) applyEntry() {
 				}
 			} else if msg.SnapshotValid {
 				//follower落后太多的场景需要更新快照
-				DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
-					//kv.lastApply = msg.CommandIndex
+					DPrintf("InstallSnapshot peerId:%d,gid:%d,snapshotIdx:%+v\n", kv.me, kv.gid, msg.SnapshotIndex)
 					//data解析
 					kv.readPersist(msg.Snapshot)
 				}
@@ -523,7 +524,7 @@ func (kv *ShardKV) encodeState() []byte {
 	encoder := labgob.NewEncoder(w)
 	encoder.Encode(kv.data)
 	encoder.Encode(kv.lastApplyUniqId)
-	//encoder.Encode(kv.lastApply)
+	encoder.Encode(kv.lastApply)
 
 	//分片相关配置
 	encoder.Encode(kv.outShards)
@@ -544,7 +545,7 @@ func (kv *ShardKV) readPersist(snapshot []byte) {
 	decoder := labgob.NewDecoder(r)
 	if decoder.Decode(&kv.data) != nil ||
 		decoder.Decode(&kv.lastApplyUniqId) != nil ||
-		//decoder.Decode(&kv.lastApply) != nil ||
+		decoder.Decode(&kv.lastApply) != nil ||
 		decoder.Decode(&kv.outShards) != nil || decoder.Decode(&kv.config) != nil ||
 		decoder.Decode(&kv.comeInShards) != nil || decoder.Decode(&kv.validShards) != nil {
 		DPrintf("read persist fail...peerId:%d", kv.me)

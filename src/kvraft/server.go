@@ -164,6 +164,10 @@ func (kv *KVServer) applyEntry() {
 				kv.mu.Unlock()
 			}()
 			if msg.CommandValid {
+				//这里是由于加载了快照以前的log需要丢弃掉
+				if msg.CommandIndex <= kv.lastApply {
+					return
+				}
 				op := msg.Command.(Op)
 				switch op.Command {
 				case PutCommand:
@@ -236,7 +240,6 @@ func (kv *KVServer) applyEntry() {
 				//follower落后太多的场景需要更新快照
 				DPrintf("Installsnapshot %v\n", msg.SnapshotIndex)
 				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
-					//kv.lastApply = msg.CommandIndex
 					//data解析
 					kv.readPersist(msg.Snapshot)
 				}

@@ -457,6 +457,16 @@ func TestConcurrent2(t *testing.T) {
 	fmt.Printf("  ... Passed\n")
 }
 
+/*func TestShard(t *testing.T) {
+	key := "3"
+	shard := 0
+	if len(key) > 0 {
+		shard = int(key[0])
+	}
+	shard %= shardctrler.NShards
+	fmt.Printf("%d",shard)
+}*/
+
 func TestConcurrent3(t *testing.T) {
 	fmt.Printf("Test: concurrent configuration change and restart...\n")
 
@@ -523,6 +533,21 @@ func TestConcurrent3(t *testing.T) {
 	}
 
 	fmt.Printf("  ... Passed\n")
+}
+
+//找到第一个差异的字符
+func TestFistDiff(t *testing.T) {
+	expect := "Jv-EGasZVgz9VzYsz2gC4p97C-5UpGsQmB42it4pOpdjr8Y-B7VBXCIotNPDfsm8HA3_aZd-cxfx3ygljWc2QjABWaM8rtY9RjDHOtxFrRDAHl5oQvD31TegFD0pKbCdiKc7BebWpzKQzhMvp3NPLvOQDpo5ah8lvyB7PJOtHCn3FNGgW-o7vXi4UD63Ixdfk2EQZuUrzzzO8eR_6-w0sUV_1gI45DMtjIra3K-LqjdF7iAg40gLB231RNtPl4bDZ2FyDAlL3mySzwn-aeHXwR6gyKS8dICV4X21-Rt"
+	actual := "Jv-EGasZVgz9VzYsz2gC4p97C-5UpGsQmB42it4pOpdjr8Y-B7VBXCIotNPDfsm8HA3_aZd-cxfx3ygljWc2QjABWaM8rtY9RjDHOtxFrRDAHl5oQvD31TegFD0pKbCdiKc7BebWpzKQzhMvp3NPLvOQDpo5ah8lvyB7PJOtHCn3FNGgW-o7vXi4UD63Ixdfk2EQZuUrzzzO8eR_6-w0sUV_1gI45DMtjIra3K-LqjdF7iAg40gLB231RNtPl4bDZ2FyDAlS8dICV4X21-Rt"
+	size := len(expect)
+	if actual < expect {
+		size = len(actual)
+	}
+	i := 0
+	for i < size && expect[i] == actual[i] {
+		i++
+	}
+	fmt.Printf("firstDiff...idx:%d,char:%s\n", i, string(expect[i]))
 }
 
 func TestUnreliable1(t *testing.T) {
