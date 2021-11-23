@@ -467,6 +467,45 @@ func TestConcurrent2(t *testing.T) {
 	fmt.Printf("%d",shard)
 }*/
 
+/*func TestDecode(t *testing.T) {
+	mp := make(map[int][]string)
+	mp[1] = []string{"1", "2", "3"}
+	mp[2] = []string{"4", "5", "6"}
+	w := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(w)
+	encoder.Encode(mp)
+
+	r := bytes.NewBuffer(w.Bytes())
+	decoder := labgob.NewDecoder(r)
+	var mp2 map[int][]string
+	decoder.Decode(&mp2)
+	for key, value := range mp2 {
+		fmt.Printf("key:%d\n", key)
+		for _, s := range value {
+			fmt.Printf(s + ",")
+		}
+		fmt.Printf("\n")
+	}
+}*/
+
+/*func TestCalDiff(t *testing.T) {
+	gid := 100
+	old := []int{102, 102, 102, 102, 102, 100, 100, 100, 100, 100}
+	new := []int{101, 101, 102, 102, 102, 101, 100, 100, 100, 100}
+	for i := 0; i < len(old); i++ {
+		from := old[i]
+		to := new[i]
+		if from == to || (from != gid && to != gid) {
+			continue
+		}
+		if from == gid {
+			fmt.Printf("分片删除...%d\n", i)
+		} else if to == gid {
+			fmt.Printf("分片增加...%d\n", i)
+		}
+	}
+}*/
+
 func TestConcurrent3(t *testing.T) {
 	fmt.Printf("Test: concurrent configuration change and restart...\n")
 
@@ -536,7 +575,7 @@ func TestConcurrent3(t *testing.T) {
 }
 
 //找到第一个差异的字符
-func TestFistDiff(t *testing.T) {
+/*func TestFistDiff(t *testing.T) {
 	expect := "Jv-EGasZVgz9VzYsz2gC4p97C-5UpGsQmB42it4pOpdjr8Y-B7VBXCIotNPDfsm8HA3_aZd-cxfx3ygljWc2QjABWaM8rtY9RjDHOtxFrRDAHl5oQvD31TegFD0pKbCdiKc7BebWpzKQzhMvp3NPLvOQDpo5ah8lvyB7PJOtHCn3FNGgW-o7vXi4UD63Ixdfk2EQZuUrzzzO8eR_6-w0sUV_1gI45DMtjIra3K-LqjdF7iAg40gLB231RNtPl4bDZ2FyDAlL3mySzwn-aeHXwR6gyKS8dICV4X21-Rt"
 	actual := "Jv-EGasZVgz9VzYsz2gC4p97C-5UpGsQmB42it4pOpdjr8Y-B7VBXCIotNPDfsm8HA3_aZd-cxfx3ygljWc2QjABWaM8rtY9RjDHOtxFrRDAHl5oQvD31TegFD0pKbCdiKc7BebWpzKQzhMvp3NPLvOQDpo5ah8lvyB7PJOtHCn3FNGgW-o7vXi4UD63Ixdfk2EQZuUrzzzO8eR_6-w0sUV_1gI45DMtjIra3K-LqjdF7iAg40gLB231RNtPl4bDZ2FyDAlS8dICV4X21-Rt"
 	size := len(expect)
@@ -548,7 +587,7 @@ func TestFistDiff(t *testing.T) {
 		i++
 	}
 	fmt.Printf("firstDiff...idx:%d,char:%s\n", i, string(expect[i]))
-}
+}*/
 
 func TestUnreliable1(t *testing.T) {
 	fmt.Printf("Test: unreliable 1...\n")
