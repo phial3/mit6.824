@@ -312,15 +312,21 @@ func (kv *ShardKV) applyEntry() {
 				if config, ok := msg.Command.(shardctrler.Config); ok {
 					DPrintf("配置更新...peerId:%d,gid:%d,config:%+v", kv.me, kv.gid, config)
 					if config.Num > kv.config.Num {
-						for shard, gid := range config.Shards {
-							curGid := kv.config.Shards[shard]
+						kv.outShards[kv.config.Num] = make(map[int]DataBackup)
+						kv.comeInShards = make(map[int][]string)
+						//分片配置差异对比
+						for shard := 0; shard < shardctrler.NShards; shard++ {
+							from := kv.config.Shards[shard]
+							to := config.Shards[shard]
 							//配置没有变更或者变更的配置跟当前集群没有关系
-							if curGid == gid || (curGid != kv.gid && gid != kv.gid) {
+							if from == to || (from != kv.gid && to != kv.gid) {
 								continue
 							}
-							if curGid == kv.gid {
+							//分片删除，直接需要把当前分片置为false,分片增加，也不能马上置为true，需要等待分片拉取成功后才能置为true
+							kv.validShards[shard] = false
+							if from == kv.gid {
 								//分片删除
-								kv.validShards[shard] = false
+								//kv.validShards[shard] = false
 								backup := DataBackup{make(map[string]string)}
 								for key, value := range kv.data {
 									if key2shard(key) == shard {
@@ -328,17 +334,20 @@ func (kv *ShardKV) applyEntry() {
 										delete(kv.data, key)
 									}
 								}
-								if _, exist := kv.outShards[kv.config.Num]; !exist {
-									kv.outShards[kv.config.Num] = make(map[int]DataBackup)
-								}
 								kv.outShards[kv.config.Num][shard] = backup
-							} else if gid == kv.gid {
+							} else if to == kv.gid {
 								//分片增加，需要从旧的group上面去拉配置
 								//0是特殊的GID，不需要备份也不需要拉取配置
-								if curGid == 0 {
+								if from == 0 {
 									kv.validShards[shard] = true
 								} else {
-									kv.comeInShards[shard] = kv.config.Groups[curGid]
+									//kv.comeInShards[shard] = kv.config.Groups[curGid]
+									//deep copy
+									servers := kv.config.Groups[from]
+									kv.comeInShards[shard] = make([]string, len(servers))
+									for i, server := range servers {
+										kv.comeInShards[shard][i] = server
+									}
 								}
 							}
 						}
@@ -478,7 +487,6 @@ func (kv *ShardKV) pullShardLoop() {
 	for !kv.killed() {
 		pullShard := func() {
 			kv.mu.Lock()
-
 			if _, leader := kv.rf.GetState(); !leader || len(kv.comeInShards) == 0 {
 				kv.mu.Unlock()
 				return
@@ -499,11 +507,6 @@ func (kv *ShardKV) pullShardLoop() {
 								//更新本地配置，这里不能直接更新，需要提交到raft来保证所有节点都能够同步到
 								kv.mu.Lock()
 								kv.rf.Start(reply)
-								/*for _, key := range reply.data {
-									kv.data[key] = reply.data[key]
-								}
-								delete(kv.comeInShards, shard)
-								kv.validShards[shard] = true*/
 								kv.mu.Unlock()
 								break
 							}
@@ -528,7 +531,7 @@ func (kv *ShardKV) encodeState() []byte {
 
 	//分片相关配置
 	encoder.Encode(kv.outShards)
-	encoder.Encode(kv.config)
+	encoder.Encode(*kv.config)
 	encoder.Encode(kv.comeInShards)
 	encoder.Encode(kv.validShards)
 	return w.Bytes()
@@ -543,13 +546,29 @@ func (kv *ShardKV) readPersist(snapshot []byte) {
 	//defer kv.mu.Unlock()
 	r := bytes.NewBuffer(snapshot)
 	decoder := labgob.NewDecoder(r)
-	if decoder.Decode(&kv.data) != nil ||
-		decoder.Decode(&kv.lastApplyUniqId) != nil ||
-		decoder.Decode(&kv.lastApply) != nil ||
-		decoder.Decode(&kv.outShards) != nil || decoder.Decode(&kv.config) != nil ||
-		decoder.Decode(&kv.comeInShards) != nil || decoder.Decode(&kv.validShards) != nil {
+	var data map[string]string
+	var lastApplyUniqId map[int]int64
+	var lastApply int
+	var outShards map[int]map[int]DataBackup
+	var config shardctrler.Config
+	var comeInShards map[int][]string
+	var validShards [shardctrler.NShards]bool
+	if decoder.Decode(&data) != nil ||
+		decoder.Decode(&lastApplyUniqId) != nil ||
+		decoder.Decode(&lastApply) != nil ||
+		decoder.Decode(&outShards) != nil ||
+		//这里是关键，我们不能直接decode kv.config，因为kv.config是一个引用
+		decoder.Decode(&config) != nil ||
+		decoder.Decode(&comeInShards) != nil || decoder.Decode(&validShards) != nil {
 		DPrintf("read persist fail...peerId:%d", kv.me)
 	} else {
+		kv.data = data
+		kv.lastApplyUniqId = lastApplyUniqId
+		kv.lastApply = lastApply
+		kv.outShards = outShards
+		kv.config = &config
+		kv.comeInShards = comeInShards
+		kv.validShards = validShards
 		DPrintf("read persist success...peerId:%d\n", kv.me)
 	}
 }
