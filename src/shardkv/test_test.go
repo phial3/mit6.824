@@ -695,6 +695,8 @@ func TestUnreliable2(t *testing.T) {
 }
 
 func TestUnreliable3(t *testing.T) {
+	//debugger := util.Debugger{}
+	//debugger.StartHTTPDebugger()
 	fmt.Printf("Test: unreliable 3...\n")
 
 	cfg := make_config(t, 3, true, 100)

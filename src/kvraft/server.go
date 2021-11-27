@@ -205,7 +205,9 @@ func (kv *KVServer) applyEntry() {
 						}*/
 						//最好不要这么写，在使用go chan的时候如果加锁很容易会导致死锁
 						for idx, ch := range kv.replyChan {
+							kv.mu.Unlock()
 							ch <- &CommitReply{true}
+							kv.mu.Lock()
 							close(ch)
 							delete(kv.replyChan, idx)
 						}
@@ -230,11 +232,11 @@ func (kv *KVServer) applyEntry() {
 				}
 				//通知所有等待线程
 				if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
-					//kv.mu.Unlock()
+					kv.mu.Unlock()
 					ch <- &CommitReply{false}
+					kv.mu.Lock()
 					close(ch)
 					delete(kv.replyChan, msg.CommandIndex)
-					//kv.mu.Lock()
 				}
 			} else if msg.SnapshotValid {
 				//follower落后太多的场景需要更新快照
