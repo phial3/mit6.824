@@ -1,6 +1,8 @@
 package raft
 
-import "fmt"
+import (
+	"fmt"
+)
 
 //lab2d因为涉及到日志的压缩，压缩后的日志数据的下标会发生改变，抽象一个类型统一在这里进行处理
 type LogType struct {
@@ -66,7 +68,15 @@ func (l *LogType) slice(start int) []LogEntry {
 	if start <= l.LastSnapshotIdx {
 		panic(fmt.Sprintf("idx err...idx:%d,snapshotIdx:%d", start, l.LastSnapshotIdx))
 	}
-	return l.Entries[start-l.LastSnapshotIdx:]
+	//这里最好做deep copy，不然数据有可能会有data race
+	//return l.Entries[start-l.LastSnapshotIdx:]
+	size := len(l.Entries) - (start - l.LastSnapshotIdx)
+	logs := make([]LogEntry, size)
+	for i := 0; i < size; i++ {
+		entry := l.Entries[start-l.LastSnapshotIdx+i]
+		logs[i] = LogEntry{entry.Term, entry.Command}
+	}
+	return logs
 }
 
 func (l *LogType) rebuild(lastIncludedTerm int, lastIncludedIndex int) {

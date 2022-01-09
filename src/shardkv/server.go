@@ -45,7 +45,8 @@ type Op struct {
 
 //表示当前的commit log是否由新的leader产生
 type CommitReply struct {
-	Err Err
+	Err   Err
+	Value string
 }
 
 type DataBackup struct {
@@ -121,22 +122,13 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	}()
 	//read log
 	op := Op{GetCommand, args.Key, "", args.ClientId, args.UniqId, 0}
-	err := kv.appendToRaft(&op)
+	v, err := kv.appendToRaft(&op)
 	reply.Err = err
 	if err != OK {
 		return
 	}
-	kv.mu.Lock()
-	value, exist := kv.data[args.Key]
-	kv.mu.Unlock()
-	if !exist {
-		reply.Err = ErrNoKey
-		reply.Value = ""
-		return
-	}
-	reply.Err = OK
-	reply.Value = value
-	return
+	reply.Err = err
+	reply.Value = v
 }
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -147,7 +139,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("PutAppend request[finish]...peerId:%d,gid:%d,args:%+v,reply:%+v", kv.me, kv.gid, args, reply)
 	}()
 	op := Op{args.Op, args.Key, args.Value, args.ClientId, args.UniqId, 0}
-	err := kv.appendToRaft(&op)
+	_, err := kv.appendToRaft(&op)
 	reply.Err = err
 }
 
@@ -181,22 +173,22 @@ func (kv *ShardKV) PullShard(args *PullShardArgs, reply *PullShardReply) {
 }
 
 //构建log并提交到raft
-func (kv *ShardKV) appendToRaft(op *Op) Err {
+func (kv *ShardKV) appendToRaft(op *Op) (string, Err) {
 	kv.mu.Lock()
 	//分区判断
 	shard := key2shard(op.Key)
 	if valid := kv.validShards[shard]; !valid {
 		kv.mu.Unlock()
-		return ErrWrongGroup
+		return "", ErrWrongGroup
 	}
 	if _, isLeader := kv.rf.GetState(); !isLeader {
 		kv.mu.Unlock()
-		return ErrWrongLeader
+		return "", ErrWrongLeader
 	}
 	logIdx, _, success := kv.rf.Start(*op)
 	if !success {
 		kv.mu.Unlock()
-		return ErrWrongLeader
+		return "", ErrWrongLeader
 	}
 	DPrintf("append to raft...peerId:%d,gid:%d,command:%+v,logIdx:%d", kv.me, kv.gid, op, logIdx)
 	//等待过半数提交
@@ -204,7 +196,7 @@ func (kv *ShardKV) appendToRaft(op *Op) Err {
 	kv.replyChan[logIdx] = ch
 	kv.mu.Unlock()
 	reply := <-ch
-	return reply.Err
+	return reply.Value, reply.Err
 }
 
 //
@@ -379,7 +371,7 @@ func (kv *ShardKV) applyEntry() {
 					shard := key2shard(op.Key)
 					if op.Command != NOOP && !kv.validShards[shard] {
 						if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
-							ch <- &CommitReply{ErrWrongGroup}
+							ch <- &CommitReply{ErrWrongGroup, ""}
 							close(ch)
 							delete(kv.replyChan, msg.CommandIndex)
 						}
@@ -413,7 +405,7 @@ func (kv *ShardKV) applyEntry() {
 							if op.Leader != kv.me && len(kv.replyChan) > 0 {
 								for idx, ch := range kv.replyChan {
 									DPrintf("NOOP唤醒等待提交的线程...peerId:%d,gid:%d,logId:%d", kv.me, kv.gid, idx)
-									ch <- &CommitReply{ErrWrongLeader}
+									ch <- &CommitReply{ErrWrongLeader, ""}
 									close(ch)
 									delete(kv.replyChan, idx)
 								}
@@ -424,7 +416,7 @@ func (kv *ShardKV) applyEntry() {
 						//kv.lastApply = msg.CommandIndex
 						//通知等待线程
 						if ch, exist := kv.replyChan[msg.CommandIndex]; exist {
-							ch <- &CommitReply{OK}
+							ch <- &CommitReply{OK, kv.data[op.Key]}
 							close(ch)
 							delete(kv.replyChan, msg.CommandIndex)
 						}
