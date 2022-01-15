@@ -6,9 +6,21 @@ import "os"
 import "net/rpc"
 import "net/http"
 
+const (
+	Undo = iota
+	Doing
+	Finish
+)
+
+type TaskInfo struct {
+	TaskId   int
+	Filename string
+	status   int
+}
+
 type Coordinator struct {
 	// Your definitions here.
-	MapTaskUndo []string
+	MapTaskUndo map[int]TaskInfo
 }
 
 // Your code here -- RPC handlers for the worker to call.

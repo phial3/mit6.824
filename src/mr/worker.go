@@ -40,6 +40,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// CallExample()
 	reply := RequestForMapTask()
 	if reply != nil {
+		taskId := reply.TaskId
 		filename := reply.FileName
 		nReduce := reply.NReduce
 		file, err := os.Open(filename)
@@ -63,7 +64,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		//写文件
 		for i := 0; i < nReduce; i++ {
-			wFilename := fmt.Sprintf("mr-%v-%v", reply.TaskId, i)
+			wFilename := fmt.Sprintf("mr-%v-%v", taskId, i)
 			wFile, err := os.Open(wFilename)
 			if err != nil {
 				log.Fatalf("cannot open %v", wFilename)
@@ -76,6 +77,8 @@ func Worker(mapf func(string, string) []KeyValue,
 				}
 			}
 		}
+		//结果通知coordinator
+		RpcTaskEnd(taskId, true)
 	}
 }
 
@@ -87,6 +90,11 @@ func RequestForMapTask() *RequestMapTaskReply {
 	} else {
 		return &reply
 	}
+}
+
+func RpcTaskEnd(taskId int, success bool) {
+	args := MapTaskEndArgs{taskId, success}
+	call("Coordinator.TaskEnd", &args, &MapTaskEndReply{})
 }
 
 //
