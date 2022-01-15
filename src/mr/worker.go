@@ -1,10 +1,14 @@
 package mr
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"os"
+)
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +28,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -35,7 +38,55 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+	reply := RequestForMapTask()
+	if reply != nil {
+		filename := reply.FileName
+		nReduce := reply.NReduce
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %v", filename)
+		}
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalf("cannot read %v", filename)
+		}
+		file.Close()
+		kva := mapf(filename, string(content))
+		//根据hash
+		intermediate := make([][]KeyValue, nReduce)
+		for i := 0; i < nReduce; i++ {
+			intermediate[i] = make([]KeyValue, 0)
+		}
+		for _, kv := range kva {
+			idx := ihash(kv.Key) % nReduce
+			intermediate[idx] = append(intermediate[idx], kv)
+		}
+		//写文件
+		for i := 0; i < nReduce; i++ {
+			wFilename := fmt.Sprintf("mr-%v-%v", reply.TaskId, i)
+			wFile, err := os.Open(wFilename)
+			if err != nil {
+				log.Fatalf("cannot open %v", wFilename)
+			}
+			enc := json.NewEncoder(wFile)
+			for _, kv := range intermediate[i] {
+				err = enc.Encode(&kv)
+				if err != nil {
+					log.Fatalf("cannot write file: %v", wFilename)
+				}
+			}
+		}
+	}
+}
 
+func RequestForMapTask() *RequestMapTaskReply {
+	args := RequestMapTaskArgs{}
+	reply := RequestMapTaskReply{}
+	if ok := call("Coordinator.RequestMapTask", &args, &reply); !ok {
+		return nil
+	} else {
+		return &reply
+	}
 }
 
 //
