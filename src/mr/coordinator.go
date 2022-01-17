@@ -10,17 +10,19 @@ const (
 	Undo = iota
 	Doing
 	Finish
+	Fail
 )
 
 type TaskInfo struct {
 	TaskId   int
 	Filename string
-	status   int
+	Status   int
 }
 
 type Coordinator struct {
 	// Your definitions here.
-	MapTaskUndo map[int]TaskInfo
+	MapTask map[int]TaskInfo
+	NReduce int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -32,6 +34,16 @@ type Coordinator struct {
 //
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
+	return nil
+}
+
+func (c *Coordinator) TaskEnd(args *MapTaskEndArgs, reply *MapTaskEndReply) error {
+	taskInfo := c.MapTask[args.TaskId]
+	if args.success {
+		taskInfo.Status = Finish
+	} else {
+		taskInfo.Status = Fail
+	}
 	return nil
 }
 
@@ -56,7 +68,7 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := false
+	ret := true
 
 	// Your code here.
 
@@ -72,7 +84,15 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 
 	// Your code here.
-	c.MapTaskUndo = files
+	c.MapTask = make(map[int]TaskInfo)
+	for i, name := range files {
+		c.MapTask[i] = TaskInfo{
+			TaskId:   i,
+			Filename: name,
+			Status:   Undo,
+		}
+	}
+	c.NReduce = nReduce
 	c.server()
 	return &c
 }
