@@ -47,6 +47,25 @@ func (c *Coordinator) TaskEnd(args *MapTaskEndArgs, reply *MapTaskEndReply) erro
 	return nil
 }
 
+func (c *Coordinator) RequestMapTask(args *RequestMapTaskArgs, reply *RequestMapTaskReply) error {
+	for i, info := range c.MapTask {
+		if info.Status == Undo {
+			reply = &RequestMapTaskReply{
+				TaskId:   i,
+				FileName: info.Filename,
+				NReduce:  c.NReduce,
+			}
+			return nil
+		}
+	}
+	reply = &RequestMapTaskReply{
+		TaskId:   -1,
+		FileName: "",
+		NReduce:  c.NReduce,
+	}
+	return nil
+}
+
 //
 // start a thread that listens for RPCs from worker.go
 //
