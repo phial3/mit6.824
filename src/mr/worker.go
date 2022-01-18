@@ -37,7 +37,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
+	CallExample()
 	reply := RequestForMapTask()
 	if reply != nil {
 		taskId := reply.TaskId
@@ -85,6 +85,9 @@ func Worker(mapf func(string, string) []KeyValue,
 func RequestForMapTask() *RequestMapTaskReply {
 	args := RequestMapTaskArgs{}
 	reply := RequestMapTaskReply{}
+	defer func() {
+		DPrintf("get map task...%d", reply.TaskId)
+	}()
 	if ok := call("Coordinator.RequestMapTask", &args, &reply); !ok {
 		return nil
 	} else {

@@ -38,6 +38,7 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (c *Coordinator) TaskEnd(args *MapTaskEndArgs, reply *MapTaskEndReply) error {
+	DPrintf("task end[start]...taskId:%d", args.TaskId)
 	taskInfo := c.MapTask[args.TaskId]
 	if args.success {
 		taskInfo.Status = Finish
@@ -48,20 +49,23 @@ func (c *Coordinator) TaskEnd(args *MapTaskEndArgs, reply *MapTaskEndReply) erro
 }
 
 func (c *Coordinator) RequestMapTask(args *RequestMapTaskArgs, reply *RequestMapTaskReply) error {
-	for i, info := range c.MapTask {
-		if info.Status == Undo {
-			reply = &RequestMapTaskReply{
-				TaskId:   i,
-				FileName: info.Filename,
-				NReduce:  c.NReduce,
-			}
-			return nil
-		}
-	}
+	DPrintf("request map task[start]...")
 	reply = &RequestMapTaskReply{
 		TaskId:   -1,
 		FileName: "",
 		NReduce:  c.NReduce,
+	}
+	defer func() {
+		DPrintf("request map task[end]...%+v", reply)
+	}()
+	for i, info := range c.MapTask {
+		if info.Status == Undo {
+			reply.TaskId = i
+			reply.FileName = info.Filename
+			reply.NReduce = c.NReduce
+			info.Status = Doing
+			return nil
+		}
 	}
 	return nil
 }
@@ -87,7 +91,7 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
-	ret := true
+	ret := false
 
 	// Your code here.
 
