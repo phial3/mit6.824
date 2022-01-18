@@ -37,7 +37,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
-	CallExample()
 	reply := RequestForMapTask()
 	if reply != nil {
 		taskId := reply.TaskId
@@ -45,7 +44,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		nReduce := reply.NReduce
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot open %v", filename)
+			log.Fatalf("cannot open %s", filename)
 		}
 		content, err := ioutil.ReadAll(file)
 		if err != nil {
@@ -64,8 +63,8 @@ func Worker(mapf func(string, string) []KeyValue,
 		}
 		//写文件
 		for i := 0; i < nReduce; i++ {
-			wFilename := fmt.Sprintf("mr-%v-%v", taskId, i)
-			wFile, err := os.Open(wFilename)
+			wFilename := fmt.Sprintf("mr-tmp/mr-%v-%v", taskId, i)
+			wFile, err := os.Create(wFilename)
 			if err != nil {
 				log.Fatalf("cannot open %v", wFilename)
 			}
@@ -86,7 +85,7 @@ func RequestForMapTask() *RequestMapTaskReply {
 	args := RequestMapTaskArgs{}
 	reply := RequestMapTaskReply{}
 	defer func() {
-		DPrintf("get map task...%d", reply.TaskId)
+		DPrintf("get map task...%+v", reply)
 	}()
 	if ok := call("Coordinator.RequestMapTask", &args, &reply); !ok {
 		return nil

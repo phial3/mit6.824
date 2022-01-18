@@ -50,11 +50,6 @@ func (c *Coordinator) TaskEnd(args *MapTaskEndArgs, reply *MapTaskEndReply) erro
 
 func (c *Coordinator) RequestMapTask(args *RequestMapTaskArgs, reply *RequestMapTaskReply) error {
 	DPrintf("request map task[start]...")
-	reply = &RequestMapTaskReply{
-		TaskId:   -1,
-		FileName: "",
-		NReduce:  c.NReduce,
-	}
 	defer func() {
 		DPrintf("request map task[end]...%+v", reply)
 	}()
