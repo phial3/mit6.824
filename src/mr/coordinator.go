@@ -134,7 +134,7 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
-
+	ret = c.mapTaskEnd() && c.reduceTaskEnd()
 	return ret
 }
 

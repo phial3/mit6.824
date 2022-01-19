@@ -37,53 +37,60 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
-	doMap(mapf)
-	doReduce(reducef)
+	for {
+		reply := RequestForMapTask()
+		if reply != nil && reply.Code != TaskWait {
+			if reply.Code == End {
+				return
+			}
+			if reply.Task.TaskType == Map {
+				doMap(reply.Task, reply.NReduce, mapf)
+			} else if reply.Task.TaskType == Reduce {
+				doReduce(reducef)
+			}
+		}
+	}
 }
 
-func doMap(mapf func(string, string) []KeyValue) {
-	reply := RequestForMapTask()
-	if reply != nil {
-		taskId := reply.TaskId
-		filename := reply.FileName
-		nReduce := reply.NReduce
-		file, err := os.Open(filename)
-		if err != nil {
-			log.Fatalf("cannot open %s", filename)
-		}
-		content, err := ioutil.ReadAll(file)
-		if err != nil {
-			log.Fatalf("cannot read %v", filename)
-		}
-		file.Close()
-		kva := mapf(filename, string(content))
-		//根据hash
-		intermediate := make([][]KeyValue, nReduce)
-		for i := 0; i < nReduce; i++ {
-			intermediate[i] = make([]KeyValue, 0)
-		}
-		for _, kv := range kva {
-			idx := ihash(kv.Key) % nReduce
-			intermediate[idx] = append(intermediate[idx], kv)
-		}
-		//写文件
-		for i := 0; i < nReduce; i++ {
-			wFilename := fmt.Sprintf("mr-tmp/mr-%v-%v", taskId, i)
-			wFile, err := os.Create(wFilename)
-			if err != nil {
-				log.Fatalf("cannot open %v", wFilename)
-			}
-			enc := json.NewEncoder(wFile)
-			for _, kv := range intermediate[i] {
-				err = enc.Encode(&kv)
-				if err != nil {
-					log.Fatalf("cannot write file: %v", wFilename)
-				}
-			}
-		}
-		//结果通知coordinator
-		RpcTaskEnd(taskId, true)
+func doMap(task *TaskInfo, nReduce int, mapf func(string, string) []KeyValue) {
+	taskId := task.TaskId
+	filename := task.Files[0]
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %s", filename)
 	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	file.Close()
+	kva := mapf(filename, string(content))
+	//根据hash
+	intermediate := make([][]KeyValue, nReduce)
+	for i := 0; i < nReduce; i++ {
+		intermediate[i] = make([]KeyValue, 0)
+	}
+	for _, kv := range kva {
+		idx := ihash(kv.Key) % nReduce
+		intermediate[idx] = append(intermediate[idx], kv)
+	}
+	//写文件
+	for i := 0; i < nReduce; i++ {
+		wFilename := fmt.Sprintf("mr-tmp/mr-%v-%v", taskId, i)
+		wFile, err := os.Create(wFilename)
+		if err != nil {
+			log.Fatalf("cannot open %v", wFilename)
+		}
+		enc := json.NewEncoder(wFile)
+		for _, kv := range intermediate[i] {
+			err = enc.Encode(&kv)
+			if err != nil {
+				log.Fatalf("cannot write file: %v", wFilename)
+			}
+		}
+	}
+	//结果通知coordinator
+	RpcTaskEnd(task, true)
 }
 
 func doReduce(reducef func(string, []string) string) {
@@ -103,8 +110,8 @@ func RequestForMapTask() *GetTaskReply {
 	}
 }
 
-func RpcTaskEnd(taskId int, success bool) {
-	args := TaskEndArgs{taskId, success}
+func RpcTaskEnd(task *TaskInfo, success bool) {
+	args := TaskEndArgs{task, success}
 	call("Coordinator.TaskEnd", &args, &TaskEndReply{})
 }
 
