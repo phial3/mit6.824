@@ -10,19 +10,26 @@ const (
 	Undo = iota
 	Doing
 	Finish
-	Fail
+)
+
+//任务类型
+const (
+	Map    = 1
+	Reduce = 2
 )
 
 type TaskInfo struct {
+	TaskType int
 	TaskId   int
-	Filename string
-	Status   int
+	Files    []string
 }
 
 type Coordinator struct {
 	// Your definitions here.
-	MapTask map[int]TaskInfo
-	NReduce int
+	NextId     int
+	MapTask    map[int][]TaskInfo
+	ReduceTask map[int][]TaskInfo
+	NReduce    int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -37,32 +44,70 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
-func (c *Coordinator) TaskEnd(args *MapTaskEndArgs, reply *MapTaskEndReply) error {
-	DPrintf("task end[start]...taskId:%d", args.TaskId)
-	taskInfo := c.MapTask[args.TaskId]
+func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
+	DPrintf("task end[start]...args:%+v", args)
+	task := pollTask(c.MapTask[Doing])
 	if args.success {
-		taskInfo.Status = Finish
+		offerTask(c.MapTask[Finish], task)
 	} else {
-		taskInfo.Status = Fail
+		offerTask(c.MapTask[Undo], task)
 	}
 	return nil
 }
 
-func (c *Coordinator) RequestMapTask(args *RequestMapTaskArgs, reply *RequestMapTaskReply) error {
+func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	DPrintf("request map task[start]...")
 	defer func() {
 		DPrintf("request map task[end]...%+v", reply)
 	}()
-	for i, info := range c.MapTask {
-		if info.Status == Undo {
-			reply.TaskId = i
-			reply.FileName = info.Filename
-			reply.NReduce = c.NReduce
-			info.Status = Doing
-			return nil
-		}
+	//出队
+	task := pollTask(c.MapTask[Undo])
+	if task != nil {
+		reply.Code = Success
+		reply.Task = task
+		reply.NReduce = c.NReduce
+		//加入到执行中的队列
+		offerTask(c.MapTask[Doing], task)
 	}
 	return nil
+	if !c.mapTaskEnd() {
+		reply.Code = TaskWait
+		return nil
+	}
+	task = pollTask(c.ReduceTask[Undo])
+	if task != nil {
+		reply.Code = Success
+		reply.Task = task
+		reply.NReduce = c.NReduce
+		//加入到执行中的队列
+		offerTask(c.ReduceTask[Doing], task)
+		return nil
+	}
+	if !c.reduceTaskEnd() {
+		reply.Code = TaskWait
+	}
+	return nil
+}
+
+func pollTask(queue []TaskInfo) *TaskInfo {
+	if len(queue) == 0 {
+		return nil
+	}
+	task := queue[0]
+	queue = queue[1:]
+	return &task
+}
+
+func offerTask(queue []TaskInfo, task *TaskInfo) {
+	queue = append(queue, *task)
+}
+
+func (c *Coordinator) mapTaskEnd() bool {
+	return len(c.MapTask[Undo]) == 0 && len(c.MapTask[Doing]) == 0
+}
+
+func (c *Coordinator) reduceTaskEnd() bool {
+	return len(c.ReduceTask[Undo]) == 0 && len(c.ReduceTask[Doing]) == 0
 }
 
 //
@@ -100,16 +145,24 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-
 	// Your code here.
-	c.MapTask = make(map[int]TaskInfo)
-	for i, name := range files {
-		c.MapTask[i] = TaskInfo{
-			TaskId:   i,
-			Filename: name,
-			Status:   Undo,
+	c.NextId = 0
+	c.MapTask = make(map[int][]TaskInfo)
+	c.MapTask[Undo] = make([]TaskInfo, 0)
+	c.MapTask[Doing] = make([]TaskInfo, 0)
+	c.MapTask[Finish] = make([]TaskInfo, 0)
+	for _, name := range files {
+		task := TaskInfo{
+			TaskType: Map,
+			TaskId:   c.NextId,
+			Files:    []string{name},
 		}
+		offerTask(c.MapTask[Undo], &task)
 	}
+	c.ReduceTask = make(map[int][]TaskInfo)
+	c.ReduceTask[Undo] = make([]TaskInfo, 0)
+	c.ReduceTask[Doing] = make([]TaskInfo, 0)
+	c.ReduceTask[Finish] = make([]TaskInfo, 0)
 	c.NReduce = nReduce
 	c.server()
 	return &c

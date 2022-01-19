@@ -37,6 +37,11 @@ func Worker(mapf func(string, string) []KeyValue,
 	// Your worker implementation here.
 
 	// uncomment to send the Example RPC to the coordinator.
+	doMap(mapf)
+	doReduce(reducef)
+}
+
+func doMap(mapf func(string, string) []KeyValue) {
 	reply := RequestForMapTask()
 	if reply != nil {
 		taskId := reply.TaskId
@@ -81,9 +86,13 @@ func Worker(mapf func(string, string) []KeyValue,
 	}
 }
 
-func RequestForMapTask() *RequestMapTaskReply {
-	args := RequestMapTaskArgs{}
-	reply := RequestMapTaskReply{}
+func doReduce(reducef func(string, []string) string) {
+	//TODO:
+}
+
+func RequestForMapTask() *GetTaskReply {
+	args := GetTaskArgs{}
+	reply := GetTaskReply{}
 	defer func() {
 		DPrintf("get map task...%+v", reply)
 	}()
@@ -95,8 +104,8 @@ func RequestForMapTask() *RequestMapTaskReply {
 }
 
 func RpcTaskEnd(taskId int, success bool) {
-	args := MapTaskEndArgs{taskId, success}
-	call("Coordinator.TaskEnd", &args, &MapTaskEndReply{})
+	args := TaskEndArgs{taskId, success}
+	call("Coordinator.TaskEnd", &args, &TaskEndReply{})
 }
 
 //
