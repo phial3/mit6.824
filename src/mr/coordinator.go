@@ -24,11 +24,36 @@ type TaskInfo struct {
 	Files    []string
 }
 
+type TaskQueue struct {
+	queue []TaskInfo
+}
+
+func MakeTaskQueue() *TaskQueue {
+	return &TaskQueue{queue: []TaskInfo{}}
+}
+
+func (q *TaskQueue) poll() *TaskInfo {
+	if len(q.queue) == 0 {
+		return nil
+	}
+	task := q.queue[0]
+	q.queue = q.queue[1:]
+	return &task
+}
+
+func (q *TaskQueue) offer(task *TaskInfo) {
+	q.queue = append(q.queue, *task)
+}
+
+func (q *TaskQueue) size() int {
+	return len(q.queue)
+}
+
 type Coordinator struct {
 	// Your definitions here.
 	NextId     int
-	MapTask    map[int][]TaskInfo
-	ReduceTask map[int][]TaskInfo
+	MapTask    map[int]*TaskQueue
+	ReduceTask map[int]*TaskQueue
 	NReduce    int
 }
 
@@ -46,11 +71,11 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
 	DPrintf("task end[start]...args:%+v", args)
-	task := pollTask(c.MapTask[Doing])
+	task := c.MapTask[Doing].poll()
 	if args.success {
-		offerTask(c.MapTask[Finish], task)
+		c.MapTask[Finish].offer(task)
 	} else {
-		offerTask(c.MapTask[Undo], task)
+		c.MapTask[Undo].offer(task)
 	}
 	return nil
 }
@@ -61,26 +86,26 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		DPrintf("request map task[end]...%+v", reply)
 	}()
 	//出队
-	task := pollTask(c.MapTask[Undo])
+	task := c.MapTask[Undo].poll()
 	if task != nil {
 		reply.Code = Success
 		reply.Task = task
 		reply.NReduce = c.NReduce
 		//加入到执行中的队列
-		offerTask(c.MapTask[Doing], task)
+		c.MapTask[Doing].offer(task)
 	}
 	return nil
 	if !c.mapTaskEnd() {
 		reply.Code = TaskWait
 		return nil
 	}
-	task = pollTask(c.ReduceTask[Undo])
+	task = c.ReduceTask[Undo].poll()
 	if task != nil {
 		reply.Code = Success
 		reply.Task = task
 		reply.NReduce = c.NReduce
 		//加入到执行中的队列
-		offerTask(c.ReduceTask[Doing], task)
+		c.ReduceTask[Doing].offer(task)
 		return nil
 	}
 	if !c.reduceTaskEnd() {
@@ -89,25 +114,12 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	return nil
 }
 
-func pollTask(queue []TaskInfo) *TaskInfo {
-	if len(queue) == 0 {
-		return nil
-	}
-	task := queue[0]
-	queue = queue[1:]
-	return &task
-}
-
-func offerTask(queue []TaskInfo, task *TaskInfo) {
-	queue = append(queue, *task)
-}
-
 func (c *Coordinator) mapTaskEnd() bool {
-	return len(c.MapTask[Undo]) == 0 && len(c.MapTask[Doing]) == 0
+	return c.MapTask[Undo].size() == 0 && c.MapTask[Doing].size() == 0
 }
 
 func (c *Coordinator) reduceTaskEnd() bool {
-	return len(c.ReduceTask[Undo]) == 0 && len(c.ReduceTask[Doing]) == 0
+	return c.ReduceTask[Undo].size() == 0 && c.ReduceTask[Doing].size() == 0
 }
 
 //
@@ -147,22 +159,24 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	// Your code here.
 	c.NextId = 0
-	c.MapTask = make(map[int][]TaskInfo)
-	c.MapTask[Undo] = make([]TaskInfo, 0)
-	c.MapTask[Doing] = make([]TaskInfo, 0)
-	c.MapTask[Finish] = make([]TaskInfo, 0)
+	c.MapTask = make(map[int]*TaskQueue)
+	c.MapTask[Undo] = MakeTaskQueue()
+	c.MapTask[Doing] = MakeTaskQueue()
+	c.MapTask[Finish] = MakeTaskQueue()
 	for _, name := range files {
 		task := TaskInfo{
 			TaskType: Map,
 			TaskId:   c.NextId,
 			Files:    []string{name},
 		}
-		offerTask(c.MapTask[Undo], &task)
+		c.NextId++
+		c.MapTask[Undo].offer(&task)
 	}
-	c.ReduceTask = make(map[int][]TaskInfo)
-	c.ReduceTask[Undo] = make([]TaskInfo, 0)
-	c.ReduceTask[Doing] = make([]TaskInfo, 0)
-	c.ReduceTask[Finish] = make([]TaskInfo, 0)
+	DPrintf("map task size,%d", c.MapTask[Undo].size())
+	c.ReduceTask = make(map[int]*TaskQueue)
+	c.ReduceTask[Undo] = MakeTaskQueue()
+	c.ReduceTask[Doing] = MakeTaskQueue()
+	c.ReduceTask[Finish] = MakeTaskQueue()
 	c.NReduce = nReduce
 	c.server()
 	return &c

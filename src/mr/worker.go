@@ -103,7 +103,7 @@ func RequestForMapTask() *GetTaskReply {
 	defer func() {
 		DPrintf("get map task...%+v", reply)
 	}()
-	if ok := call("Coordinator.RequestMapTask", &args, &reply); !ok {
+	if ok := call("Coordinator.GetTask", &args, &reply); !ok {
 		return nil
 	} else {
 		return &reply
