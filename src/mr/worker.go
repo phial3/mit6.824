@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"time"
 )
 import "log"
 import "net/rpc"
@@ -49,6 +50,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				doReduce(reducef)
 			}
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

@@ -40,7 +40,7 @@ type GetTaskReply struct {
 
 type TaskEndArgs struct {
 	Task    *TaskInfo
-	success bool
+	Success bool
 }
 
 type TaskEndReply struct {

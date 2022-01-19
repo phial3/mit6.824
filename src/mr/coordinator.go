@@ -38,6 +38,7 @@ func (q *TaskQueue) poll() *TaskInfo {
 	}
 	task := q.queue[0]
 	q.queue = q.queue[1:]
+	DPrintf("poll size:%d", q.size())
 	return &task
 }
 
@@ -72,7 +73,7 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
 	DPrintf("task end[start]...args:%+v", args)
 	task := c.MapTask[Doing].poll()
-	if args.success {
+	if args.Success {
 		c.MapTask[Finish].offer(task)
 	} else {
 		c.MapTask[Undo].offer(task)
@@ -83,7 +84,7 @@ func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	DPrintf("request map task[start]...")
 	defer func() {
-		DPrintf("request map task[end]...%+v", reply)
+		DPrintf("request map task[end]...code:%d,task:%+v", reply.Code, *reply.Task)
 	}()
 	//出队
 	task := c.MapTask[Undo].poll()
