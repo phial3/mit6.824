@@ -55,11 +55,19 @@ func (q *TaskQueue) size() int {
 
 type Coordinator struct {
 	// Your definitions here.
-	mu         sync.Mutex
-	NextId     int
-	MapTask    map[int]*TaskQueue
-	ReduceTask map[int]*TaskQueue
-	NReduce    int
+	mu     sync.Mutex
+	NextId int
+	//map task
+	MapTaskQueue *TaskQueue
+	MapTaskDoing map[int]TaskInfo
+	//MapTaskDone  map[int]TaskInfo
+	MapTaskResult map[int][]string
+	//reduce task
+	ReduceTaskQueue *TaskQueue
+	ReduceTaskDoing map[int]TaskInfo
+	//ReduceTaskDone  map[int]TaskInfo
+
+	NReduce int
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -78,11 +86,15 @@ func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
 	c.mu.Lock()
 	DPrintf("task end[start]...args:%+v", args)
 	defer c.mu.Unlock()
-	task := c.MapTask[Doing].poll()
-	if args.Success {
-		c.MapTask[Finish].offer(task)
-	} else {
-		c.MapTask[Undo].offer(task)
+	task := args.Task
+	if task.TaskType == Map {
+		delete(c.MapTaskDoing, task.TaskId)
+		if args.Success {
+			//c.MapTaskDone[task.TaskId] = *task
+		} else {
+			c.MapTaskQueue.offer(task)
+		}
+		//所有map完成，则
 	}
 	return nil
 }
@@ -99,26 +111,26 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		}
 	}()
 	//出队
-	task := c.MapTask[Undo].poll()
+	task := c.MapTaskQueue.poll()
 	if task != nil {
 		reply.Code = Success
 		reply.Task = task
 		reply.NReduce = c.NReduce
 		//加入到执行中的队列
-		c.MapTask[Doing].offer(task)
+		c.MapTaskDoing[task.TaskId] = *task
 		return nil
 	}
 	if !c.mapTaskEnd() {
 		reply.Code = TaskWait
 		return nil
 	}
-	task = c.ReduceTask[Undo].poll()
+	task = c.ReduceTaskQueue.poll()
 	if task != nil {
 		reply.Code = Success
 		reply.Task = task
 		reply.NReduce = c.NReduce
 		//加入到执行中的队列
-		c.ReduceTask[Doing].offer(task)
+		c.ReduceTaskDoing[task.TaskId] = *task
 		return nil
 	}
 	if !c.reduceTaskEnd() {
@@ -130,11 +142,11 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 }
 
 func (c *Coordinator) mapTaskEnd() bool {
-	return c.MapTask[Undo].size() == 0 && c.MapTask[Doing].size() == 0
+	return c.MapTaskQueue.size() == 0 && len(c.MapTaskDoing) == 0
 }
 
 func (c *Coordinator) reduceTaskEnd() bool {
-	return c.ReduceTask[Undo].size() == 0 && c.ReduceTask[Doing].size() == 0
+	return c.ReduceTaskQueue.size() == 0 && len(c.ReduceTaskDoing) == 0
 }
 
 //
@@ -176,10 +188,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	// Your code here.
 	c.NextId = 0
-	c.MapTask = make(map[int]*TaskQueue)
-	c.MapTask[Undo] = MakeTaskQueue()
-	c.MapTask[Doing] = MakeTaskQueue()
-	c.MapTask[Finish] = MakeTaskQueue()
+	c.MapTaskQueue = MakeTaskQueue()
+	c.MapTaskDoing = make(map[int]TaskInfo)
+	//c.MapTaskDone = make(map[int]TaskInfo)
 	for _, name := range files {
 		task := TaskInfo{
 			TaskType: Map,
@@ -187,13 +198,12 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			Files:    []string{name},
 		}
 		c.NextId++
-		c.MapTask[Undo].offer(&task)
+		c.MapTaskQueue.offer(&task)
 	}
-	DPrintf("map task size,%d", c.MapTask[Undo].size())
-	c.ReduceTask = make(map[int]*TaskQueue)
-	c.ReduceTask[Undo] = MakeTaskQueue()
-	c.ReduceTask[Doing] = MakeTaskQueue()
-	c.ReduceTask[Finish] = MakeTaskQueue()
+	DPrintf("map task size,%d", c.MapTaskQueue.size())
+	c.ReduceTaskQueue = MakeTaskQueue()
+	c.ReduceTaskDoing = make(map[int]TaskInfo)
+	//c.ReduceTaskDone = make(map[int]TaskInfo)
 	c.NReduce = nReduce
 	c.server()
 	return &c

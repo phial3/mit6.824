@@ -41,6 +41,8 @@ type GetTaskReply struct {
 type TaskEndArgs struct {
 	Task    *TaskInfo
 	Success bool
+	//输出文件
+	Files []string
 }
 
 type TaskEndReply struct {
