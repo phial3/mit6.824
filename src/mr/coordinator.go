@@ -1,6 +1,9 @@
 package mr
 
-import "log"
+import (
+	"log"
+	"sync"
+)
 import "net"
 import "os"
 import "net/rpc"
@@ -52,6 +55,7 @@ func (q *TaskQueue) size() int {
 
 type Coordinator struct {
 	// Your definitions here.
+	mu         sync.Mutex
 	NextId     int
 	MapTask    map[int]*TaskQueue
 	ReduceTask map[int]*TaskQueue
@@ -71,7 +75,9 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
+	c.mu.Lock()
 	DPrintf("task end[start]...args:%+v", args)
+	defer c.mu.Unlock()
 	task := c.MapTask[Doing].poll()
 	if args.Success {
 		c.MapTask[Finish].offer(task)
@@ -82,9 +88,15 @@ func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
 }
 
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
+	c.mu.Lock()
 	DPrintf("request map task[start]...")
 	defer func() {
-		DPrintf("request map task[end]...code:%d,task:%+v", reply.Code, *reply.Task)
+		c.mu.Unlock()
+		if reply.Task == nil {
+			DPrintf("request map task[end]...code:%d", reply.Code)
+		} else {
+			DPrintf("request map task[end]...code:%d,task:%+v", reply.Code, *reply.Task)
+		}
 	}()
 	//出队
 	task := c.MapTask[Undo].poll()
@@ -94,8 +106,8 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		reply.NReduce = c.NReduce
 		//加入到执行中的队列
 		c.MapTask[Doing].offer(task)
+		return nil
 	}
-	return nil
 	if !c.mapTaskEnd() {
 		reply.Code = TaskWait
 		return nil
@@ -111,7 +123,9 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	}
 	if !c.reduceTaskEnd() {
 		reply.Code = TaskWait
+		return nil
 	}
+	reply.Code = End
 	return nil
 }
 
@@ -144,6 +158,8 @@ func (c *Coordinator) server() {
 // if the entire job has finished.
 //
 func (c *Coordinator) Done() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	ret := false
 
 	// Your code here.
