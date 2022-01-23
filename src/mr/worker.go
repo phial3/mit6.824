@@ -88,7 +88,7 @@ func doMap(task *TaskInfo, nReduce int, mapf func(string, string) []KeyValue) {
 	//写文件
 	fileMap := make(map[int]string)
 	for i := 0; i < nReduce; i++ {
-		wFilename := fmt.Sprintf("mr-tmp/mr-%v-%v", taskId, i)
+		wFilename := fmt.Sprintf("mr-%v-%v", taskId, i)
 		fileMap[i] = wFilename
 		wFile, err := os.Create(wFilename)
 		if err != nil {
@@ -149,7 +149,11 @@ func RequestForMapTask() *GetTaskReply {
 	args := GetTaskArgs{}
 	reply := GetTaskReply{}
 	defer func() {
-		DPrintf("get map task...%+v", reply)
+		if reply.Task != nil {
+			DPrintf("get map task...code:%d,task:%+v", reply.Code, *reply.Task)
+		} else {
+			DPrintf("get map task...code:%d,task:%+v", reply.Code, nil)
+		}
 	}()
 	if ok := call("Coordinator.GetTask", &args, &reply); !ok {
 		return nil
