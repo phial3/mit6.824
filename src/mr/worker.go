@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"sort"
 	"time"
 )
 import "log"
@@ -18,6 +19,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -47,7 +56,7 @@ func Worker(mapf func(string, string) []KeyValue,
 			if reply.Task.TaskType == Map {
 				doMap(reply.Task, reply.NReduce, mapf)
 			} else if reply.Task.TaskType == Reduce {
-				doReduce(reducef)
+				doReduce(reply.Task, reply.NReduce, reducef)
 			}
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -97,8 +106,43 @@ func doMap(task *TaskInfo, nReduce int, mapf func(string, string) []KeyValue) {
 	RpcTaskEnd(task, true, fileMap)
 }
 
-func doReduce(reducef func(string, []string) string) {
-	//TODO:
+func doReduce(task *TaskInfo, nReduce int, reducef func(string, []string) string) {
+	taskId := task.TaskId
+	intermediate := make([]KeyValue, 0)
+	for _, filename := range task.Files {
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Fatalf("cannot open %s", filename)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
+	}
+	sort.Sort(ByKey(intermediate))
+	oname := fmt.Sprintf("mr-out-%d", taskId)
+	ofile, _ := os.Create(oname)
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	RpcTaskEnd(task, true, make(map[int]string))
 }
 
 func RequestForMapTask() *GetTaskReply {

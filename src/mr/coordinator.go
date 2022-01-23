@@ -99,13 +99,12 @@ func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
 		}
 		//所有map完成，则生成reduce的JOB
 		if c.mapTaskEnd() {
-			for _, files := range c.MapTaskResult {
+			for par, files := range c.MapTaskResult {
 				task := TaskInfo{
 					TaskType: Reduce,
-					TaskId:   c.NextId,
+					TaskId:   par,
 					Files:    files,
 				}
-				c.NextId++
 				c.ReduceTaskQueue.offer(&task)
 			}
 		}
