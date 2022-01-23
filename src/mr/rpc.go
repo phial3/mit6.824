@@ -42,7 +42,7 @@ type TaskEndArgs struct {
 	Task    *TaskInfo
 	Success bool
 	//输出文件
-	Files []string
+	Files map[int]string
 }
 
 type TaskEndReply struct {

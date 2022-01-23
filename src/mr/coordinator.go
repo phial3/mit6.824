@@ -91,10 +91,31 @@ func (c *Coordinator) TaskEnd(args *TaskEndArgs, reply *TaskEndReply) error {
 		delete(c.MapTaskDoing, task.TaskId)
 		if args.Success {
 			//c.MapTaskDone[task.TaskId] = *task
+			for par, file := range args.Files {
+				c.MapTaskResult[par] = append(c.MapTaskResult[par], file)
+			}
 		} else {
 			c.MapTaskQueue.offer(task)
 		}
-		//所有map完成，则
+		//所有map完成，则生成reduce的JOB
+		if c.mapTaskEnd() {
+			for _, files := range c.MapTaskResult {
+				task := TaskInfo{
+					TaskType: Reduce,
+					TaskId:   c.NextId,
+					Files:    files,
+				}
+				c.NextId++
+				c.ReduceTaskQueue.offer(&task)
+			}
+		}
+	} else {
+		delete(c.ReduceTaskDoing, task.TaskId)
+		if args.Success {
+			//DO NOTHING
+		} else {
+			c.ReduceTaskQueue.offer(task)
+		}
 	}
 	return nil
 }
@@ -190,6 +211,10 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.NextId = 0
 	c.MapTaskQueue = MakeTaskQueue()
 	c.MapTaskDoing = make(map[int]TaskInfo)
+	c.MapTaskResult = make(map[int][]string)
+	for i := 0; i < nReduce; i++ {
+		c.MapTaskResult[i] = make([]string, 0)
+	}
 	//c.MapTaskDone = make(map[int]TaskInfo)
 	for _, name := range files {
 		task := TaskInfo{

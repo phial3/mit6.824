@@ -77,8 +77,10 @@ func doMap(task *TaskInfo, nReduce int, mapf func(string, string) []KeyValue) {
 		intermediate[idx] = append(intermediate[idx], kv)
 	}
 	//写文件
+	fileMap := make(map[int]string)
 	for i := 0; i < nReduce; i++ {
 		wFilename := fmt.Sprintf("mr-tmp/mr-%v-%v", taskId, i)
+		fileMap[i] = wFilename
 		wFile, err := os.Create(wFilename)
 		if err != nil {
 			log.Fatalf("cannot open %v", wFilename)
@@ -92,7 +94,7 @@ func doMap(task *TaskInfo, nReduce int, mapf func(string, string) []KeyValue) {
 		}
 	}
 	//结果通知coordinator
-	RpcTaskEnd(task, true)
+	RpcTaskEnd(task, true, fileMap)
 }
 
 func doReduce(reducef func(string, []string) string) {
@@ -112,8 +114,8 @@ func RequestForMapTask() *GetTaskReply {
 	}
 }
 
-func RpcTaskEnd(task *TaskInfo, success bool) {
-	args := TaskEndArgs{task, success}
+func RpcTaskEnd(task *TaskInfo, success bool, fileMap map[int]string) {
+	args := TaskEndArgs{task, success, fileMap}
 	call("Coordinator.TaskEnd", &args, &TaskEndReply{})
 }
 
